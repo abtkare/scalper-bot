@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One-command installer for Ubuntu/Debian VPS (Hostinger KVM etc.). Run as root:
 #   curl -fsSL https://raw.githubusercontent.com/abtkare/scalper-bot/main/install.sh | TD_KEY=xxxx bash
+#   short form (asks for the code that unlocks key.enc):  curl -sL is.gd/snabot | bash
 # Optional: DASH_PW=...  (dashboard password; generated if empty)   BRANCH=main
 # Safe to run again: it updates the code and keeps state/trades/.env.
 set -euo pipefail
@@ -19,7 +20,7 @@ command -v apt-get >/dev/null || { echo "This installer supports Ubuntu/Debian o
 say "1/8 System packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq git python3 python3-venv python3-pip curl ca-certificates chrony >/dev/null
+apt-get install -y -qq git python3 python3-venv python3-pip curl ca-certificates chrony openssl >/dev/null
 systemctl enable --now chrony >/dev/null 2>&1 || true
 
 say "2/8 Service user + code"
@@ -46,6 +47,17 @@ setkv() {  # setkv KEY VALUE  -> replace or append
   if grep -q "^$1=" "$ENV"; then sed -i "s|^$1=.*|$1=$2|" "$ENV"; else echo "$1=$2" >> "$ENV"; fi
 }
 getkv() { grep "^$1=" "$ENV" | head -1 | cut -d= -f2- || true; }
+if [ -z "${TD_KEY:-}" ] && [ -z "$(getkv TWELVE_DATA_API_KEY)" ] && [ -f "$APP_DIR/key.enc" ]; then
+  # no copy/paste needed: the API key is stored encrypted in the repo, unlocked with a short code
+  for try in 1 2 3; do
+    printf '\n\033[1;36m>>> Type the 8-letter code from Claude and press Enter: \033[0m'
+    read -r CODE </dev/tty || CODE=""
+    CODE="$(echo "$CODE" | tr -d ' ' | tr 'A-Z' 'a-z')"
+    TD_KEY="$(openssl enc -d -aes-256-cbc -pbkdf2 -iter 1000000 -a -A -pass pass:"$CODE" -in "$APP_DIR/key.enc" 2>/dev/null || true)"
+    if [[ "$TD_KEY" =~ ^[0-9a-f]{32}$ ]]; then echo "code OK"; break; fi
+    TD_KEY=""; echo "wrong code, try again"
+  done
+fi
 [ -n "${TD_KEY:-}" ] && setkv TWELVE_DATA_API_KEY "$TD_KEY"
 [ -n "$(getkv TWELVE_DATA_API_KEY)" ] || { echo "TD_KEY is required the first time (TD_KEY=xxxx bash)"; exit 1; }
 rnd() { python3 -c "import secrets,string;a=string.ascii_letters+string.digits;print(''.join(secrets.choice(a) for _ in range($1)))"; }
