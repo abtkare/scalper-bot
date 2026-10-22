@@ -48,8 +48,9 @@ setkv() {  # setkv KEY VALUE  -> replace or append
 getkv() { grep "^$1=" "$ENV" | head -1 | cut -d= -f2- || true; }
 [ -n "${TD_KEY:-}" ] && setkv TWELVE_DATA_API_KEY "$TD_KEY"
 [ -n "$(getkv TWELVE_DATA_API_KEY)" ] || { echo "TD_KEY is required the first time (TD_KEY=xxxx bash)"; exit 1; }
-DASH_PW="${DASH_PW:-$(getkv DASHBOARD_PASSWORD)}"; DASH_PW="${DASH_PW:-$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 14)}"
-MON="$(getkv MONITOR_TOKEN)"; MON="${MON:-$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)}"
+rnd() { python3 -c "import secrets,string;a=string.ascii_letters+string.digits;print(''.join(secrets.choice(a) for _ in range($1)))"; }
+DASH_PW="${DASH_PW:-$(getkv DASHBOARD_PASSWORD)}"; DASH_PW="${DASH_PW:-$(rnd 14)}"
+MON="$(getkv MONITOR_TOKEN)"; MON="${MON:-$(rnd 32)}"
 setkv MODE paper
 setkv DASHBOARD_PASSWORD "$DASH_PW"
 setkv MONITOR_TOKEN "$MON"
