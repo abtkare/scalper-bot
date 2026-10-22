@@ -144,7 +144,7 @@ class Dashboard:
                 log.warning("control %s from %s", cmd, who)
                 return self._send(200, {"ok": True, "cmd": cmd, "message": msg})
 
-        srv = ThreadingHTTPServer(("0.0.0.0", self.port), H)
+        srv = ThreadingHTTPServer((os.getenv("DASHBOARD_HOST", "0.0.0.0"), self.port), H)
         srv.daemon_threads = True
         threading.Thread(target=srv.serve_forever, name="dashboard", daemon=True).start()
         log.info("dashboard listening on port %d", self.port)
