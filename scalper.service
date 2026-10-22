@@ -1,0 +1,25 @@
+[Unit]
+Description=Scalper paper-trading bot
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+StartLimitIntervalSec=0
+
+[Service]
+# CHANGE_ME = your Linux username on the server
+Type=notify
+NotifyAccess=main
+WatchdogSec=60
+User=CHANGE_ME
+WorkingDirectory=/home/CHANGE_ME/scalper-bot
+ExecStart=/home/CHANGE_ME/scalper-bot/venv/bin/python -u bot.py
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/CHANGE_ME/scalper-bot
+
+[Install]
+WantedBy=multi-user.target

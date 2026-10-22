@@ -1,0 +1,13 @@
+.env
+state.json*
+bot.lock
+bot.log*
+status.json*
+trades_live.csv
+STOP
+FLATTEN
+HALT
+__pycache__/
+venv/
+out/*.csv
+data/*_1min.csv

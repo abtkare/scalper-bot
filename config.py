@@ -1,0 +1,201 @@
+"""Central configuration. Edit values here, or override via .env / environment.
+
+Every numeric field of `Params` can be overridden with an environment variable of the
+same name in UPPER_CASE (e.g. RISK_PCT=0.003, TD_CREDITS_PER_MIN=55).
+"""
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass, field, fields
+from typing import List, Tuple
+from zoneinfo import ZoneInfo
+
+
+class ConfigError(ValueError):
+    """Raised at startup for an invalid configuration (the bot refuses to run)."""
+
+
+def load_env(path: str = ".env") -> None:
+    """Tiny .env loader (no extra dependency). Existing env vars win."""
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+@dataclass
+class Params:
+    # --- account / risk ---
+    initial_equity: float = 1000.0
+    risk_pct: float = 0.005          # risk per trade as fraction of equity (0.5%)
+    max_leverage: float = 5.0        # cap on notional / equity
+    daily_loss_cap: float = 0.03     # stop trading for the day after -3%
+    max_consec_losses: int = 3       # stop for the day after N losses in a row
+    max_trades_per_day: int = 10     # per account, per day
+
+    # --- strategy (5-minute bars) ---
+    ema_fast: int = 20
+    ema_slow: int = 50
+    rsi_len: int = 14
+    rsi_min: float = 40.0            # long needs RSI in [rsi_min, rsi_max]
+    rsi_max: float = 65.0            # shorts use the mirrored band
+    atr_len: int = 14
+    stop_atr: float = 1.0            # stop distance = stop_atr * ATR
+    target_atr: float = 1.5          # target distance = target_atr * ATR
+    # Skip setups whose target is not at least N x the round-trip cost.
+    min_target_cost_multiple: float = 3.0
+
+    # --- speed (live loop) ---
+    loop_sec: float = 0.2            # main loop period; exits are evaluated on every quote
+    bar_settle_sec: float = 1.0      # wait this long after a bar closes before trusting it
+    bar_retry_sec: float = 1.5       # re-poll interval while waiting for the new bar
+    quote_poll_sec: float = 2.0      # live price poll while a position is open
+    entry_poll_sec: float = 0.5      # live price poll while an entry is pending
+    max_entry_delay_sec: float = 20.0  # skip the entry if we cannot fill within N s of the bar open
+    max_entry_slip_atr: float = 0.5  # skip if the fill is > N*ATR away from the signal bar close
+
+    # --- safety ---
+    max_quote_age_sec: float = 30.0  # position open + no fresh price for N s -> alert + wick backstop
+    max_tick_jump_pct: float = 3.0   # a single tick moving more than this must be confirmed
+    max_error_streak: int = 8        # N consecutive data errors -> block NEW entries
+    td_credits_per_min: int = 8      # your Twelve Data plan's credits/minute (free plan = 8)
+    http_connect_timeout: float = 3.0
+    http_read_timeout: float = 5.0
+
+
+@dataclass
+class SymbolCfg:
+    symbol: str                      # Twelve Data symbol, e.g. "QQQ", "BTC/USD"
+    kind: str                        # "stock" or "crypto"
+    tz: str                          # timezone of the bar timestamps
+    interval: str = "5min"
+    interval_minutes: int = 5
+    cost_bps: float = 1.0            # per SIDE: commission + spread + slippage (ASSUMPTION - replace with real numbers)
+    allow_short: bool = False
+    flatten_eod: bool = False        # close everything at the end of the session
+    eod_time: str = "15:55"          # bar-start time at/after which we flatten (exchange local)
+    windows: List[Tuple[str, str]] = field(default_factory=list)  # entry windows, exchange local; empty = always
+    provider: str = "twelvedata"     # bars (+ quotes) source: "twelvedata" | "binance"
+    quote_provider: str = ""         # optional different source for live prices ("" = same as provider)
+    provider_symbol: str = ""        # override symbol name at the provider (binance: BTCUSDT)
+    poll_sec: float = 0.0            # per-symbol live-price poll interval (0 = Params.quote_poll_sec)
+    strategy: str = "pullback"       # "pullback" (EMA20/50 pullback, original) | "breakout" (Donchian + trend)
+    donchian_n: int = 24             # breakout: close above the highest high of the previous N bars
+    stop_atr: float = 0.0            # per-symbol overrides (0 = use Params.stop_atr / target_atr)
+    target_atr: float = 0.0
+
+    @property
+    def file_stub(self) -> str:
+        return self.symbol.replace("/", "-")
+
+    @property
+    def quote_src(self) -> str:
+        return self.quote_provider or self.provider
+
+
+# v3 research (1 year of real data, see RESEARCH.md):
+#   * the original 5-min pullback LOST money on every market after costs (QQQ -15%, BTC -39%/yr)
+#   * ~25,000 configurations tested; the only candidate that survived in- and out-of-sample checks and a
+#     random-entry placebo is a 15-min breakout on QQQ (long only). It FAILED on SPY/IWM/DIA and breaks
+#     even at 2 bps cost -> treat it as an EXPERIMENT to be forward-tested in paper mode, not as a proven edge.
+#   * BTC/ETH/SOL: no configuration profitable at realistic crypto costs -> not traded (kept below, commented).
+SYMBOLS: List[SymbolCfg] = [
+    SymbolCfg(
+        symbol="QQQ", kind="stock", tz="America/New_York",
+        interval="15min", interval_minutes=15, strategy="breakout", donchian_n=24,
+        stop_atr=0.75, target_atr=2.0,
+        cost_bps=1.0, flatten_eod=True, eod_time="15:45",
+        windows=[("09:45", "15:30")],
+    ),
+    # Original v2 setting - lost 39% in the 1-year backtest. Enable only to study it in paper mode.
+    # SymbolCfg(symbol="BTC/USD", kind="crypto", tz="UTC", cost_bps=6.0),
+    # SymbolCfg(symbol="SPY", kind="stock", tz="America/New_York", cost_bps=1.0,
+    #           flatten_eod=True, windows=[("09:35", "11:00"), ("15:00", "15:50")]),
+]
+
+PROVIDERS = ("twelvedata", "binance")
+
+
+def _env_key(symbol: str) -> str:
+    return re.sub(r"\W", "_", symbol).upper()
+
+
+def apply_env_overrides(symbols: List[SymbolCfg]) -> None:
+    """PROVIDER_BTC_USD=binance  /  QUOTE_PROVIDER_BTC_USD=binance  /  POLL_SEC_BTC_USD=1"""
+    for s in symbols:
+        k = _env_key(s.symbol)
+        s.provider = os.getenv(f"PROVIDER_{k}", s.provider).strip().lower()
+        s.quote_provider = os.getenv(f"QUOTE_PROVIDER_{k}", s.quote_provider).strip().lower()
+        s.poll_sec = float(os.getenv(f"POLL_SEC_{k}", s.poll_sec) or 0.0)
+
+
+def get_params() -> Params:
+    p = Params()
+    for f in fields(p):
+        raw = os.getenv(f.name.upper())
+        if raw is None or raw.strip() == "":
+            continue
+        cur = getattr(p, f.name)
+        try:
+            setattr(p, f.name, int(float(raw)) if isinstance(cur, int) else float(raw))
+        except ValueError:
+            raise ConfigError(f"{f.name.upper()}={raw!r} is not a valid number")
+    return p
+
+
+_HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def validate_config(p: Params, symbols: List[SymbolCfg]) -> None:
+    """Refuse to start on values that would silently cause losses or crashes later."""
+    def need(cond: bool, msg: str) -> None:
+        if not cond:
+            raise ConfigError(msg)
+
+    need(p.initial_equity > 0, "INITIAL_EQUITY must be > 0")
+    need(0 < p.risk_pct <= 0.05, "RISK_PCT must be in (0, 0.05]")
+    need(0 < p.max_leverage <= 20, "MAX_LEVERAGE must be in (0, 20]")
+    need(0 < p.daily_loss_cap <= 0.2, "DAILY_LOSS_CAP must be in (0, 0.2]")
+    need(p.max_consec_losses >= 1 and p.max_trades_per_day >= 1, "daily limits must be >= 1")
+    need(p.stop_atr > 0 and p.target_atr > 0, "stop_atr / target_atr must be > 0")
+    need(0.05 <= p.loop_sec <= 2.0, "LOOP_SEC must be in [0.05, 2]")
+    need(p.bar_settle_sec >= 0 and p.bar_retry_sec >= 0.2, "bar_settle_sec >= 0 and bar_retry_sec >= 0.2")
+    need(p.quote_poll_sec >= 0.2 and p.entry_poll_sec >= 0.2, "poll intervals must be >= 0.2 s")
+    need(p.max_entry_delay_sec > 0 and p.max_entry_slip_atr > 0, "entry guards must be > 0")
+    need(p.max_tick_jump_pct > 0, "MAX_TICK_JUMP_PCT must be > 0")
+    need(p.td_credits_per_min >= 1, "TD_CREDITS_PER_MIN must be >= 1")
+    need(p.http_connect_timeout > 0 and p.http_read_timeout > 0, "HTTP timeouts must be > 0")
+    need(len(symbols) > 0, "SYMBOLS is empty")
+
+    seen = set()
+    for s in symbols:
+        need(s.symbol not in seen, f"duplicate symbol {s.symbol}")
+        seen.add(s.symbol)
+        need(s.kind in ("stock", "crypto"), f"{s.symbol}: kind must be 'stock' or 'crypto'")
+        try:
+            ZoneInfo(s.tz)
+        except Exception:
+            raise ConfigError(f"{s.symbol}: unknown timezone {s.tz!r}")
+        need(s.interval_minutes >= 1, f"{s.symbol}: interval_minutes must be >= 1")
+        need(s.cost_bps >= 0, f"{s.symbol}: cost_bps must be >= 0")
+        need(s.provider in PROVIDERS, f"{s.symbol}: provider must be one of {PROVIDERS}")
+        need(s.quote_src in PROVIDERS, f"{s.symbol}: quote_provider must be one of {PROVIDERS}")
+        need(s.poll_sec >= 0, f"{s.symbol}: poll_sec must be >= 0")
+        need(s.strategy in ("pullback", "breakout"), f"{s.symbol}: strategy must be 'pullback' or 'breakout'")
+        need(s.donchian_n >= 2, f"{s.symbol}: donchian_n must be >= 2")
+        need(s.stop_atr >= 0 and s.target_atr >= 0, f"{s.symbol}: stop_atr/target_atr must be >= 0")
+        need(_HHMM.match(s.eod_time) is not None, f"{s.symbol}: eod_time must be HH:MM")
+        for a, b in s.windows:
+            need(_HHMM.match(a) and _HHMM.match(b) and a <= b, f"{s.symbol}: bad window {(a, b)}")
+        if "binance" in (s.provider, s.quote_src):
+            need(s.kind == "crypto" and s.tz == "UTC", f"{s.symbol}: binance is only for crypto with tz='UTC'")
+        if s.kind == "stock" and s.flatten_eod:
+            need(s.tz == "America/New_York", f"{s.symbol}: the built-in NYSE calendar needs tz='America/New_York'")
+    if any("twelvedata" in (s.provider, s.quote_src) for s in symbols):
+        need(bool(os.getenv("TWELVE_DATA_API_KEY")), "TWELVE_DATA_API_KEY is not set (see .env.example)")

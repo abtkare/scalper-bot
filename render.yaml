@@ -1,0 +1,23 @@
+# Render blueprint (optional - the service was created through the API with the same settings)
+services:
+  - type: web
+    name: scalper-bot
+    runtime: python
+    plan: starter            # always-on; the free plan sleeps after 15 min and would stop the bot
+    region: virginia         # close to US market-data servers
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -u bot.py
+    healthCheckPath: /healthz
+    envVars:
+      - key: MODE
+        value: paper
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: TWELVE_DATA_API_KEY
+        sync: false
+      - key: DASHBOARD_PASSWORD
+        sync: false
+      - key: MONITOR_TOKEN
+        sync: false
+      - key: QUOTE_POLL_SEC
+        value: "20"
