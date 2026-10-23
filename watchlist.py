@@ -94,7 +94,7 @@ def make_cfg(symbol: str, cls: str, strategy: str) -> SymbolCfg:
                          windows=[("09:45", "15:30")], **common)
         if strategy == "breakout":
             return replace(base, interval="15min", interval_minutes=15, strategy="breakout", donchian_n=24,
-                           stop_atr=0.75, target_atr=2.0, history_bars=300)
+                           htf_mult=4, stop_atr=0.75, target_atr=2.0, history_bars=300)
         if strategy == "scalp":
             return replace(base, interval="15min", interval_minutes=15, strategy="scalp", vwap_k=1.0,
                            stop_atr=2.0, target_atr=0.75, allow_short=True)
@@ -112,7 +112,7 @@ def make_cfg(symbol: str, cls: str, strategy: str) -> SymbolCfg:
                            stop_atr=2.0, target_atr=0.75, allow_short=True, windows=[("03:00", "12:00")],
                            poll_sec=20.0)
         return replace(base, interval="1h", interval_minutes=60, strategy="breakout", donchian_n=12,
-                       stop_atr=2.0, target_atr=2.5, windows=[("03:00", "12:00")])
+                       htf_mult=4, stop_atr=2.0, target_atr=2.5, windows=[("03:00", "12:00")])
 
     # crypto (Binance public data: free, no credits)
     base = SymbolCfg(kind="crypto", tz="UTC", provider="binance", poll_sec=5.0, **common)

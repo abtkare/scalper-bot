@@ -137,6 +137,7 @@ class Runtime:
         self.by_name = {s.cfg.symbol: s for s in self.syms}
         self.providers = providers
         self.stopping = threading.Event()
+        self.news = None                                         # news.NewsWatcher (context only, never trades)
         self.dirty = False
         self.last_save = 0.0
         self.last_wd = self.last_hb = 0.0
@@ -837,7 +838,8 @@ class Runtime:
                 "equity": round(a.equity, 2), "day_start_equity": round(a.day_start_equity, 2),
                 "trades_today": a.trades_today, "consec_losses": a.consec_losses,
                 "stop_file": os.path.exists(self.stop_file), "flatten_file": os.path.exists(self.flatten_file),
-                "guardian": self.guard.status(now), "symbols": syms, "recent_trades": self.recent_trades[-10:]}
+                "guardian": self.guard.status(now), "symbols": syms, "recent_trades": self.recent_trades[-10:],
+                "news": self.news.snapshot() if self.news is not None else None}
 
     def _win_bg(self, ss: SymState, now: float) -> str:
         """Entry windows shown in Baghdad time (follows US/EU daylight-saving changes automatically)."""
@@ -1024,6 +1026,14 @@ def main() -> None:
         Dashboard(lambda: rt.status(time.time()), ctl.handle, lambda: rt.last_alive, pw, tok,
                   tail=LOG_TAIL, port=int(os.getenv("PORT")), restart_fn=lambda: rt.stopping.set(),
                   watch_fn=_watch).start()
+
+    if os.getenv("NEWS_WATCH", "1") != "0":                  # Truth Social window - alerts only, never trades
+        try:
+            from news import NewsWatcher
+            rt.news = NewsWatcher(lambda m: notifier.send(m), float(os.getenv("NEWS_POLL_SEC", "300")))
+            rt.news.start(rt.stopping)
+        except Exception as e:                                # news must never stop the bot
+            log.warning("news watcher not started: %s", e)
 
     from remote import RemoteLink
     RemoteLink(os.getenv("NTFY_TOPIC", ""), os.getenv("MONITOR_TOKEN", ""), lambda: rt.status(time.time()),

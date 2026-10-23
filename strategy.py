@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from config import Params, SymbolCfg
+import structure
 
 
 def add_indicators(df: pd.DataFrame, p: Params) -> pd.DataFrame:
@@ -80,6 +81,13 @@ def signals(d: pd.DataFrame, p: Params, scfg: SymbolCfg) -> pd.DataFrame:
         long_sig, short_sig = _rsi2(d, scfg)
     else:
         long_sig, short_sig = _pullback(d, p, up_trend, dn_trend)
+    if scfg.htf_mult:
+        # Top-down reading (v9, RESEARCH.md section 10): no entry against the higher-timeframe structure
+        # (HH/HL vs LH/LL of CLOSED HTF bars). Breakout lines: QQQ +0.17R -> +0.33R/trade, better in both halves.
+        htf = structure.htf_trend(d, scfg.interval_minutes * scfg.htf_mult)
+        d = d.assign(htf_trend=htf)
+        long_sig = long_sig & (htf >= 0)
+        short_sig = short_sig & (htf <= 0)
     return _finish(d, p, scfg, long_sig, short_sig)
 
 
@@ -183,6 +191,13 @@ def plan_levels(d: pd.DataFrame, p: Params, scfg: SymbolCfg) -> dict:
             note.append("الاتجاه ليس صاعداً: لا شراء")
         if not trend_after(trig_s) < 0:
             short_ok = False
+        if "htf_trend" in d.columns:
+            htf = int(last["htf_trend"])
+            if htf < 0 and long_ok:
+                long_ok = False
+                note.append("الإطار الأكبر هابط: لا شراء")
+            if htf > 0:
+                short_ok = False
         op_l, op_s = ">", "<"
     elif scfg.strategy == "scalp":
         trig_l = float(last["vwap"] - scfg.vwap_k * atr)
@@ -222,4 +237,16 @@ def plan_levels(d: pd.DataFrame, p: Params, scfg: SymbolCfg) -> dict:
     if short_ok and math.isfinite(trig_s) and trig_s > 0:
         out["short"] = side(trig_s, op_s, -1)
     out["note"] = "، ".join(note)
+    try:                                              # the "expert chart reading" shown on the dashboard
+        tail = structure.analyze(d.iloc[-300:])
+        r = tail.iloc[-1]
+        out["structure"] = {"trend": int(r["st_trend"]), "event": r["st_event"],
+                            "event_recent": next((e for e in tail["st_event"].iloc[-12:][::-1] if e), ""),
+                            "swing_hi": None if math.isnan(r["swing_hi"]) else round(float(r["swing_hi"]), 6),
+                            "swing_lo": None if math.isnan(r["swing_lo"]) else round(float(r["swing_lo"]), 6),
+                            "leg_atr": round(float(r["leg_atr"]), 2),
+                            "htf": int(last["htf_trend"]) if "htf_trend" in d.columns else None,
+                            "text": structure.describe(r)}
+    except Exception:                                 # informational only - never block the plan
+        pass
     return out

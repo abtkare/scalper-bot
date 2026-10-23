@@ -90,6 +90,7 @@ class SymbolCfg:
     donchian_n: int = 24             # breakout: close above the highest high of the previous N bars
     vwap_k: float = 1.0              # scalp: enter when close is more than k*ATR away from the session VWAP
     history_bars: int = 300          # bars kept/downloaded for indicators (scalp needs ~600 for EMA200)
+    htf_mult: int = 0                # >0: skip entries AGAINST the higher-timeframe market structure (HTF = interval*N)
     rsi2_th: float = 10.0            # rsi2: long when RSI(2) < th (above EMA200), short when RSI(2) > 100-th (below)
     exit_only: bool = False          # set automatically for a leftover position of a mode that is switched off
     stop_atr: float = 0.0            # per-symbol overrides (0 = use Params.stop_atr / target_atr)
@@ -127,7 +128,7 @@ class SymbolCfg:
 #   * BTC/ETH/SOL: no configuration profitable at realistic crypto costs -> not traded (kept below, commented).
 BREAKOUT_QQQ = SymbolCfg(
     symbol="QQQ", kind="stock", tz="America/New_York",
-    interval="15min", interval_minutes=15, strategy="breakout", donchian_n=24,
+    interval="15min", interval_minutes=15, strategy="breakout", donchian_n=24, htf_mult=4,
     stop_atr=0.75, target_atr=2.0,
     cost_bps=1.0, flatten_eod=True, eod_time="15:45",
     windows=[("09:45", "15:30")],

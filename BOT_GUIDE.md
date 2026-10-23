@@ -86,6 +86,8 @@ GitHub (main)  ──عند كل تشغيل للحاوية──▶  boot.py ي�
 | `ctrader.py` | التنفيذ على حساب cTrader التجريبي (وقف وهدف على سيرفر الوسيط) |
 | `broker.py` | واجهة التنفيذ + المحاكاة |
 | `providers.py` | Twelve Data (أسهم/عملات/ذهب) و Binance (رقمية) + ميزانية الطلبات اليومية |
+| `structure.py` | قراءة هيكل السوق (قمم/قيعان، اتجاه، كسر/انعكاس) + فلتر الإطار الأكبر لأسطر الاختراق |
+| `news.py` | نافذة أخبار ترامب (أرشيف CNN، 24KB كل 5 دقائق) — تنبيه فقط، لا تؤثر على الصفقات (`NEWS_WATCH=0` للإيقاف) |
 | `dashboard.py` | لوحة التحكم |
 | `remote.py` | قناة ntfy (حالة كل دقيقة، تنبيهات، أوامر) |
 | `backtest.py` | الاختبار التاريخي (`--mode qqq|fx|scalp|all`) |
@@ -99,7 +101,7 @@ GitHub (main)  ──عند كل تشغيل للحاوية──▶  boot.py ي�
 ### أ) عبر Claude (الطريقة المعتادة)
 1. في المحادثة الجديدة يطلب Claude صلاحية الرفع على المستودع (`abtkare/scalper-bot`) — وافق على رسالة الصلاحية إن ظهرت.
 2. Claude يعدّل الكود، يشغّل **كل الاختبارات**:
-   `python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py && python test_watchlist.py && python test_ctrader.py`
+   `python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py && python test_watchlist.py && python test_ctrader.py && python test_structure.py && python test_news.py`
 3. يرفع على فرع `main`.
 4. إعادة التشغيل لتحميل الكود (أي طريقة):
    - **لوحة التحكم ← 🔄 تحديث البوت من GitHub** (الأسهل)، أو

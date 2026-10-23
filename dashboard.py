@@ -223,6 +223,7 @@ h2{font-size:15px;margin:18px 0 8px}#msg{min-height:20px;font-size:13px}
 <h2>قائمة المراقبة وخطط الدخول</h2>
 <div class="mut" id="wlsub">يتداول البوت آلياً فقط ما نجح في اختبار تاريخه (✅). الباقي مراقبة مع خطة جاهزة.</div>
 <div id="wl"></div>
+<div id="news"></div>
 <div class="c" style="margin-top:10px"><div class="k" style="margin-bottom:6px">➕ إضافة رمز (مؤشر، زوج عملات، معدن، عملة رقمية)</div>
  <input id="nsym" placeholder="مثال: XAU/USD أو EUR/USD أو SPY أو BTC/USD" dir="ltr" style="width:100%;font:inherit;padding:11px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--tx)">
  <select id="ncls" style="width:100%;font:inherit;padding:10px;margin-top:8px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--tx)">
@@ -298,7 +299,15 @@ function fwTxt(f){ if(!f||!f.n) return ''; return '<div style="font-size:12px">�
 function qTxt(q){ if(!q||q.n==null) return ''; let t='اختبار تاريخه: '+q.n+' صفقة';
  if(q.wr!=null) t+=' · ربح '+q.wr+'% · '+(q.avgR>0?'+':'')+q.avgR+'R · معامل '+q.pf;
  return '<div class="mut" style="font-size:12px">'+esc(t)+(q.status!='ok'&&q.reason?' — '+esc(q.reason):'')+'</div>';}
-function renderWL(s){ const by={}; for(const [id,v] of Object.entries(s.symbols||{})){(by[v.ticker||id]=by[v.ticker||id]||[]).push([id,v]);}
+function stxt(x){ if(!x) return ''; const H={1:'صاعد',"-1":'هابط',0:'متذبذب'};
+ return '<div style="font-size:12px;margin-top:2px">🧭 '+esc(x.text)+(x.htf!=null?' · الإطار الأكبر: '+H[x.htf]:'')+(x.swing_hi!=null?'<span class="mut" dir="ltr"> · قمة '+dp(x.swing_hi)+' / قاع '+dp(x.swing_lo)+'</span>':'')+'</div>';}
+function renderNews(n){ if(!n){$('news').innerHTML='';return;} const h=n.health||{};
+ let x='<div class="c" style="margin-top:12px"><b>📰 نافذة الأخبار (ترامب — Truth Social)</b><div class="mut" style="font-size:12px">'
+  +(h.ok===false?'⚠ المصدر لا يستجيب: '+esc(h.error||''):h.ok?'✅ المصدر يعمل · جديد اليوم: '+(h.new_today||0):'⏳ أول فحص…')
+  +' · للمعلومة فقط — لا تؤثر على الصفقات</div>';
+ for(const i of (n.items||[]).slice(0,12)){ x+='<div style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px;font-size:13px"><span class="mut" dir="ltr">'+esc(String(i.ts).slice(5,16).replace('T',' '))+' UTC</span> · <b>'+esc(i.label)+'</b><div>'+esc(i.text.slice(0,260))+'</div></div>';}
+ $('news').innerHTML=x+'</div>';}
+function renderWL(s){ renderNews(s.news); const by={}; for(const [id,v] of Object.entries(s.symbols||{})){(by[v.ticker||id]=by[v.ticker||id]||[]).push([id,v]);}
  const near=a=>Math.min(...a.map(([i,v])=>{const p=v.plan||{};return Math.min(p.long?Math.abs(p.long.dist_pct):99,p.short?Math.abs(p.short.dist_pct):99);}));
  const keys=Object.keys(by).sort((a,b)=>near(by[a])-near(by[b]));
  let h='';
@@ -308,7 +317,7 @@ function renderWL(s){ const by={}; for(const [id,v] of Object.entries(s.symbols|
   for(const [id,v] of rows){ const p=v.plan||{};
    h+='<div style="border-top:1px solid var(--line);margin-top:8px;padding-top:8px"><div style="display:flex;justify-content:space-between;gap:6px;flex-wrap:wrap"><div><b>'+esc(SN[v.strategy]||v.strategy)+'</b> <span class="mut">'+esc(v.interval||'')+(v.win_bg?' · الدخول '+esc(v.win_bg)+' بغداد':'')+'</span></div><div>'+stTxt(v)+'</div></div>'
     +'<div style="margin-top:4px">'+sideTxt(p.long,true)+'</div>'+(v.allow_short?'<div style="margin-top:4px">'+sideTxt(p.short,false)+'</div>':'')
-    +(p.note?'<div class="mut" style="font-size:12px">'+esc(p.note)+'</div>':'')+(p.bar?'<div class="mut" style="font-size:11px">آخر شمعة: '+esc(String(p.bar).slice(5,16))+'</div>':'<div class="mut" style="font-size:12px">بانتظار أول بيانات…</div>')
+    +(p.note?'<div class="mut" style="font-size:12px">'+esc(p.note)+'</div>':'')+stxt(p.structure)+(p.bar?'<div class="mut" style="font-size:11px">آخر شمعة: '+esc(String(p.bar).slice(5,16))+'</div>':'<div class="mut" style="font-size:12px">بانتظار أول بيانات…</div>')
     +fwTxt(v.fw)+(v.auto_off?'<div class="mut" style="font-size:12px">'+esc(v.auto_off)+'</div>':'')+qTxt(v.qual)
     +'<button class="'+(v.disabled||v.auto_off?'br':'bs')+'" style="padding:6px 10px;font-size:12px;margin-top:6px" onclick="wl(\''+(v.disabled||v.auto_off?'on':'off')+'\',{id:\''+esc(id)+'\'},null)">'+(v.disabled||v.auto_off?'▶ تفعيل التداول الآلي':'⏸ إيقاف التداول الآلي لهذا السطر')+'</button></div>';}
   h+='</div>';}
