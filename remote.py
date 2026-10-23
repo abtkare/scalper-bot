@@ -84,7 +84,14 @@ class RemoteLink:
                 "err": {k: v.get("errors") for k, v in (st.get("symbols") or {}).items()},
                 "pos": pos, "ev": (g.get("last_events") or [])[-3:],
                 "last": [{k: t.get(k) for k in ("symbol", "side", "reason", "pnl", "R", "exit_ts")}
-                         for t in (st.get("recent_trades") or [])[-3:]]}
+                         for t in (st.get("recent_trades") or [])[-3:]],
+                # per stream: auto-trading?, qualification, forward paper results [n, wins, sumR, pnl]
+                "tr": [k for k, v in (st.get("symbols") or {}).items() if v.get("trading")],
+                "q": {k: (v.get("qual") or {}).get("status") for k, v in (st.get("symbols") or {}).items()},
+                "fw": {k: [f.get("n"), f.get("w"), f.get("sumR"), f.get("pnl")]
+                       for k, v in (st.get("symbols") or {}).items() for f in [v.get("fw") or {}] if f.get("n")},
+                "off": {k: v.get("auto_off") for k, v in (st.get("symbols") or {}).items() if v.get("auto_off")},
+                "cr": st.get("credits")}
 
     def handle(self, text: str) -> str:
         parts = (text or "").strip().split()

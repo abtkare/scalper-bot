@@ -289,10 +289,12 @@ function sideTxt(pl,buy){ if(!pl) return '<span class="mut">'+(buy?'لا شرا�
  const w=buy?'شراء':'بيع', op=pl.op=='<'?'تحت':'فوق';
  return '<b class="'+(buy?'pos':'neg')+'">'+w+'</b> إذا أغلقت الشمعة '+op+' <b>'+dp(pl.trigger)+'</b> <span class="mut">('+(pl.dist_pct>0?'+':'')+pl.dist_pct+'%)</span>'+(pl.bound!=null?' <span class="mut">و'+(buy?'فوق':'تحت')+' '+dp(pl.bound)+'</span>':'')+'<br><span class="mut">وقف</span> '+dp(pl.stop)+' · <span class="mut">هدف</span> '+dp(pl.target);}
 function stTxt(v){ if(v.disabled) return '<span class="badge warn">⏸ موقوف يدوياً</span>';
+ if(v.auto_off) return '<span class="badge bad">🛑 أوقفه البوت: نتائجه الفعلية سيئة</span>';
  if(v.trading) return '<span class="badge ok">✅ تداول آلي</span>';
  const q=v.qual; if(!q) return '<span class="badge warn">⏳ قيد الاختبار</span>';
  if(q.status=='error') return '<span class="badge bad">⚠️ '+esc(q.reason||'خطأ')+'</span>';
  return '<span class="badge warn">👁 مراقبة فقط</span>';}
+function fwTxt(f){ if(!f||!f.n) return ''; return '<div style="font-size:12px">النتائج الفعلية: '+f.n+' صفقة · ربح '+Math.round(100*f.w/f.n)+'% · '+(f.sumR>=0?'+':'')+(f.sumR/f.n).toFixed(2)+'R · '+(f.pnl>=0?'+':'')+f.pnl.toFixed(2)+'$</div>';}
 function qTxt(q){ if(!q||q.n==null) return ''; let t='اختبار تاريخه: '+q.n+' صفقة';
  if(q.wr!=null) t+=' · ربح '+q.wr+'% · '+(q.avgR>0?'+':'')+q.avgR+'R · معامل '+q.pf;
  return '<div class="mut" style="font-size:12px">'+esc(t)+(q.status!='ok'&&q.reason?' — '+esc(q.reason):'')+'</div>';}
@@ -307,8 +309,8 @@ function renderWL(s){ const by={}; for(const [id,v] of Object.entries(s.symbols|
    h+='<div style="border-top:1px solid var(--line);margin-top:8px;padding-top:8px"><div style="display:flex;justify-content:space-between;gap:6px;flex-wrap:wrap"><div><b>'+esc(SN[v.strategy]||v.strategy)+'</b> <span class="mut">'+esc(v.interval||'')+(v.win_bg?' · الدخول '+esc(v.win_bg)+' بغداد':'')+'</span></div><div>'+stTxt(v)+'</div></div>'
     +'<div style="margin-top:4px">'+sideTxt(p.long,true)+'</div>'+(v.allow_short?'<div style="margin-top:4px">'+sideTxt(p.short,false)+'</div>':'')
     +(p.note?'<div class="mut" style="font-size:12px">'+esc(p.note)+'</div>':'')+(p.bar?'<div class="mut" style="font-size:11px">آخر شمعة: '+esc(String(p.bar).slice(5,16))+'</div>':'<div class="mut" style="font-size:12px">بانتظار أول بيانات…</div>')
-    +qTxt(v.qual)
-    +'<button class="'+(v.disabled?'br':'bs')+'" style="padding:6px 10px;font-size:12px;margin-top:6px" onclick="wl(\''+(v.disabled?'on':'off')+'\',{id:\''+esc(id)+'\'},null)">'+(v.disabled?'▶ تفعيل التداول الآلي':'⏸ إيقاف التداول الآلي لهذا السطر')+'</button></div>';}
+    +fwTxt(v.fw)+(v.auto_off?'<div class="mut" style="font-size:12px">'+esc(v.auto_off)+'</div>':'')+qTxt(v.qual)
+    +'<button class="'+(v.disabled||v.auto_off?'br':'bs')+'" style="padding:6px 10px;font-size:12px;margin-top:6px" onclick="wl(\''+(v.disabled||v.auto_off?'on':'off')+'\',{id:\''+esc(id)+'\'},null)">'+(v.disabled||v.auto_off?'▶ تفعيل التداول الآلي':'⏸ إيقاف التداول الآلي لهذا السطر')+'</button></div>';}
   h+='</div>';}
  $('wl').innerHTML=h||'<div class="c">القائمة فارغة</div>';
  const cr=s.credits; $('wlsub').textContent='يتداول البوت آلياً فقط ما نجح في اختبار تاريخه (✅). الباقي مراقبة مع خطة جاهزة.'+(cr?' · رصيد بيانات اليوم: '+cr.used+' / '+cr.cap:'');}

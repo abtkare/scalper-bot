@@ -113,6 +113,8 @@ class SymState:
         self.next_qual_try = 0.0
         self.plan: Optional[dict] = None                   # pre-computed entry/stop/target levels
         self.disabled = False                              # switched off by the user (dashboard)
+        self.fw = {"n": 0, "w": 0, "sumR": 0.0, "pnl": 0.0}  # forward (paper) results since v7
+        self.auto_off = ""                                 # reason if the forward kill-switch turned it off
         self.flat_min = 16 * 60 - (int(cfg.eod_time[:2]) * 60 + int(cfg.eod_time[3:]))   # 5 for "15:55"
 
 
@@ -182,6 +184,10 @@ class Runtime:
                 ss = self.by_name.get(sid)
                 if ss is not None:
                     ss.disabled = action == "off"
+                    if action == "on" and ss.auto_off:
+                        ss.auto_off = ""                       # the owner decided to give it another chance
+                        ss.fw = {"n": 0, "w": 0, "sumR": 0.0, "pnl": 0.0}
+                        self.dirty = True
                 if action == "off":
                     return True, f"{sid}: أُوقف التداول الآلي (المراقبة والخطة مستمرتان؛ الصفقة المفتوحة تُدار حتى تُغلق).", False
                 ok_q = ss is not None and ss.qual and ss.qual.get("status") == "ok"
@@ -209,6 +215,8 @@ class Runtime:
                     "last_signal_ts": s.last_signal_ts.isoformat() if s.last_signal_ts is not None else None,
                     "position": s.eng.pos.to_dict() if s.eng.pos else None,
                     "qual": s.qual,
+                    "fw": s.fw,
+                    "auto_off": s.auto_off,
                 } for s in self.syms
             },
         }
@@ -245,6 +253,9 @@ class Runtime:
                 ss.eng.pos = Position.from_dict(d["position"])
             if isinstance(d.get("qual"), dict):
                 ss.qual = d["qual"]
+            if isinstance(d.get("fw"), dict):
+                ss.fw.update({k: d["fw"][k] for k in ss.fw if k in d["fw"]})
+            ss.auto_off = str(d.get("auto_off") or "")
         log.info("state restored: equity=%.2f open=%s", a.equity,
                  [s.cfg.symbol for s in self.syms if s.eng.pos])
 
@@ -322,7 +333,7 @@ class Runtime:
 
     def _trading(self, ss: SymState) -> bool:
         """May this stream open trades automatically? (qualified by its own backtest, not switched off)"""
-        if ss.disabled or ss.cfg.exit_only:
+        if ss.disabled or ss.cfg.exit_only or ss.auto_off:
             return False
         return (not self.gate) or bool(ss.qual and ss.qual.get("status") == "ok")
 
@@ -341,6 +352,25 @@ class Runtime:
             if lo <= m <= hi:
                 return True
         return False
+
+    FW_MIN_TRADES = 20
+    FW_MIN_AVG_R = -0.05
+
+    def _forward_check(self, ss: SymState, R: float, pnl: float) -> None:
+        """Forward kill-switch: the backtest said this stream should make money. If the REAL paper results
+        disagree (>= 20 trades averaging below -0.05R) the stream stops auto-trading until the owner
+        re-enables it from the dashboard. Only ever reduces risk."""
+        f = ss.fw
+        f["n"] += 1
+        f["w"] += int(R > 0)
+        f["sumR"] = round(f["sumR"] + R, 4)
+        f["pnl"] = round(f["pnl"] + pnl, 2)
+        self.dirty = True
+        if not ss.auto_off and f["n"] >= self.FW_MIN_TRADES and f["sumR"] / f["n"] < self.FW_MIN_AVG_R:
+            ss.auto_off = (f"النتائج الفعلية أسوأ من الاختبار: {f['n']} صفقة بمتوسط "
+                           f"{f['sumR'] / f['n']:+.2f}R - أُوقف تلقائياً")
+            self.n.send(f"{ss.cfg.symbol}: FORWARD KILL-SWITCH - {f['n']} trades avg {f['sumR'] / f['n']:+.3f}R "
+                        f"-> auto-trading OFF (re-enable from the dashboard)", level=logging.WARNING)
 
     def _schedule_qual(self, ss: SymState, now: float) -> None:
         if not self.gate or ss.qual_future is not None or now < ss.next_qual_try or ss.disabled:
@@ -558,6 +588,10 @@ class Runtime:
             self.guard.on_trade(tr["symbol"], float(tr["R"]), self.acct.equity, now)
         except Exception:
             log.exception("guardian on_trade failed")
+        try:
+            self._forward_check(ss, float(tr["R"]), float(tr["pnl"]))
+        except Exception:
+            log.exception("forward check failed")
         self.dirty = True
         lat = f" latency={now - latency_from:.1f}s" if latency_from else ""
         self.n.send(f"EXIT {tr['symbol']} {tr['side']} {tr['reason']} pnl={tr['pnl']:.2f} "
@@ -748,6 +782,7 @@ class Runtime:
                 "strategy": ss.cfg.strategy, "ticker": ss.cfg.ticker, "interval": ss.cfg.interval,
                 "class": self.classes.get(ss.cfg.symbol, ss.cfg.kind),
                 "trading": self._trading(ss), "disabled": ss.disabled, "qual": ss.qual, "plan": ss.plan,
+                "fw": ss.fw, "auto_off": ss.auto_off,
                 "windows": ss.cfg.windows, "win_bg": self._win_bg(ss, now), "allow_short": ss.cfg.allow_short,
                 "position": None if p_ is None else {
                     "side": "long" if p_.side == 1 else "short", "qty": p_.qty, "entry": p_.entry,

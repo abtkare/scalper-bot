@@ -252,6 +252,34 @@ def test_runtime_watchlist_actions():
     ok("runtime: add -> restart, off -> live, remove refused while a position is open, junk refused")
 
 
+def test_forward_kill_switch():
+    e = _gate_env({"status": "ok", "at": time.time()})
+    ss = e.ss
+    for _ in range(19):
+        e.rt._forward_check(ss, -0.3, -1.0)
+    assert not ss.auto_off and e.rt._trading(ss), "must wait for 20 forward trades"
+    e.rt._forward_check(ss, -0.3, -1.0)
+    assert ss.auto_off and not e.rt._trading(ss), "20 losing forward trades must switch the stream off"
+    st = e.rt.snapshot()
+    rt2 = e.new_runtime()
+    rt2.restore(st)
+    assert rt2.syms[0].auto_off and rt2.syms[0].fw["n"] == 20, "kill-switch must survive a restart"
+    f = os.path.join(e.tmp, "wl2.json")
+    wl.save([{"symbol": "TEST/USD", "class": "crypto", "strategies": ["scalp"]}], f)
+    rt2.by_name["TEST/USD-SCALP"] = rt2.syms[0]
+    okk, msg, _ = rt2.watchlist_action("on", {"id": "TEST/USD-SCALP"}, f)
+    assert okk and not rt2.syms[0].auto_off and rt2.syms[0].fw["n"] == 0
+    e2 = _gate_env({"status": "ok", "at": time.time()})
+    for _ in range(25):
+        e2.rt._forward_check(e2.ss, 0.2, 1.0)
+    assert not e2.ss.auto_off
+    import remote
+    link = remote.RemoteLink("", "", lambda: e.rt.status(e.clock.now), lambda c: "", lambda: None)
+    cs = link.compact_status()
+    assert "fw" in cs and "q" in cs and "tr" in cs
+    ok("forward kill-switch: 20 real paper trades averaging < -0.05R switch a stream off (persisted); owner can re-enable")
+
+
 if __name__ == "__main__":
     real = bot.signals
     for name, fn in list(globals().items()):
