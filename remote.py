@@ -53,6 +53,7 @@ class RemoteLink:
         self.status_fn, self.command_fn, self.restart_fn = status_fn, command_fn, restart_fn
         self.alerts: deque = deque(maxlen=200)
         self.seen: deque = deque(maxlen=500)              # message ids already executed (exactly-once)
+        self.boot = time.time()                            # commands sent before this process started are ignored
         self.sess = requests.Session()
 
     @property
@@ -121,8 +122,9 @@ class RemoteLink:
             if mid in self.seen:
                 continue                                       # ntfy may re-deliver: run each command once
             self.seen.append(mid)
-            if time.time() - float(m.get("time", 0)) > 120:
-                continue                                       # stale command (e.g. sent while the bot was down)
+            sent = float(m.get("time", 0))
+            if time.time() - sent > 120 or sent < self.boot - 1:
+                continue                                       # stale, or already handled by the previous process
             reply = self.handle(m.get("message", ""))
             if reply:
                 cmd = m.get("message", "").split()[0]
