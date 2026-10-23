@@ -1,0 +1,24 @@
+# Reference compose file. Secrets go in "environment" on the server only - never commit them.
+services:
+  scalper:
+    build: https://github.com/abtkare/scalper-bot.git#main
+    container_name: scalper-bot
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    environment:
+      MODE: paper
+      PORT: "8088"
+      QUOTE_POLL_SEC: "20"
+      TWELVE_DATA_API_KEY: "put-your-key-here"
+      DASHBOARD_PASSWORD: "choose-a-password"
+      MONITOR_TOKEN: "long-random-token"
+      NTFY_TOPIC: "long-random-topic"
+    volumes:
+      - scalper-data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 600M
+volumes:
+  scalper-data:

@@ -718,6 +718,10 @@ def main() -> None:
         Dashboard(lambda: rt.status(time.time()), ctl.handle, lambda: rt.last_alive, pw, tok,
                   tail=LOG_TAIL, port=int(os.getenv("PORT"))).start()
 
+    from remote import RemoteLink
+    RemoteLink(os.getenv("NTFY_TOPIC", ""), os.getenv("MONITOR_TOKEN", ""), lambda: rt.status(time.time()),
+               ctl.handle, lambda: rt.stopping.set()).start()
+
     def _bye(*_):
         rt.stopping.set()
     for sig in (signal.SIGINT, getattr(signal, "SIGTERM", None)):
