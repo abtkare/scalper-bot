@@ -36,6 +36,7 @@
 | `telegram_ctl.py` | أوامر تيليغرام (اختياري) |
 | `providers.py` / `data.py` | مزوّدو البيانات (Twelve Data، Binance)، تنظيف الشموع |
 | `broker.py` | طبقة التنفيذ. `PaperBroker` حالياً؛ الوسيط الحقيقي يُكتب هنا (cTrader مثلاً) |
+| `ctrader.py` | التنفيذ على حساب cTrader التجريبي (JSON عبر WebSocket، وقف وهدف على جانب الوسيط) |
 | `watchlist.py` | قائمة المراقبة (`watchlist.json`)، قوالب كل فئة (مؤشر/عملات/معادن/رقمية) وكل استراتيجية |
 | `qualify.py` | بوابة الاختبار: سطر يتداول آلياً فقط إن ربح على تاريخه |
 | `fx_hours.py` | ساعات الذهب والعملات (الأحد 17:00/18:00 → الجمعة 17:00 نيويورك، استراحة الذهب) |
@@ -51,7 +52,7 @@
 1. **أي تغيير في الاستراتيجية أو الإعدادات = اختبار تاريخي أولاً:** `python backtest.py --all` وقارن التدريب (60%) بالاختبار (40%). إن ساءت النتيجة خارج العيّنة فلا ترفع.
 2. **شغّل كل الاختبارات قبل الرفع:**
    ```
-   python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py && python test_watchlist.py
+   python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py && python test_watchlist.py && python test_ctrader.py
    ```
 3. **لا تضع أي سر في المستودع** (المفتاح، كلمة سر اللوحة، MONITOR_TOKEN، NTFY_TOPIC). هذه تُكتب فقط في إعدادات الحاوية على هوستنجر.
 4. الحارس والأزرار **تقلل المخاطرة فقط**؛ لا تضف أي طريق يفتح صفقة من خارج الاستراتيجية.
@@ -84,3 +85,16 @@
 2. وسيط **مرخّص** يدعم واجهة برمجية (cTrader Open API مثلاً) — ابدأ بحساب **Demo** لديه.
 3. كتابة `LiveBroker` في `broker.py` وفق الشروط المكتوبة في رأس الملف (وقف على جانب الوسيط، معرّف أمر فريد، مطابقة المراكز عند البدء)، واختباره على الـ Demo أسابيع.
 4. رصيد يسمح بمخاطرة 0.5% بأصغر حجم لدى الوسيط (عملياً ≥ 500 دولار)، ومال تتحمل خسارته كاملاً.
+
+
+## 9) ربط حساب cTrader التجريبي (EXECUTION=ctrader_demo)
+متغيرات الحاوية على هوستنجر (لا تُكتب في المستودع أبداً):
+| المتغير | من أين |
+|---|---|
+| `EXECUTION=ctrader_demo` | يحوّل التنفيذ من المحاكاة إلى حساب cTrader التجريبي |
+| `CTRADER_CLIENT_ID` / `CTRADER_CLIENT_SECRET` | openapi.ctrader.com ← Applications ← Credentials |
+| `CTRADER_ACCESS_TOKEN` / `CTRADER_REFRESH_TOKEN` | Applications ← Sandbox (Playground) ← scope **trading** ← Get token |
+| `CTRADER_ACCOUNT_ID` (اختياري) | افتراضياً أول حساب **تجريبي** للتوكن |
+| `CTRADER_SYMBOL_MAP` (اختياري) | مثل `QQQ=US100` إن كانت أسماء الوسيط مختلفة |
+- كل صفقة تُرسل مع وقف وهدف على سيرفر الوسيط. الرموز غير الموجودة لدى الوسيط تبقى محاكاة.
+- الحساب الحقيقي **غير مدعوم** في هذه النسخة عمداً.

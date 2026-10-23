@@ -1,7 +1,7 @@
 """Execution layer. The engine DECIDES (signals, sizing, stops); a Broker EXECUTES.
 
-`PaperBroker` simulates fills. To trade real money you would write a `LiveBroker(Broker)` for the
-broker you choose - it is intentionally NOT included. A live adapter MUST:
+`PaperBroker` simulates fills. `ctrader.CTraderBroker` executes on a cTrader DEMO account (EXECUTION=ctrader_demo).
+Any live adapter MUST:
 
   1. Use `client_id` as the broker's client-order-id (idempotency: a retry after a timeout must not
      open a second position).
@@ -34,10 +34,13 @@ class Broker(ABC):
     name = "abstract"
 
     @abstractmethod
-    def market_entry(self, symbol: str, side: int, qty: float, ref_price: float, client_id: str) -> Fill: ...
+    def market_entry(self, symbol: str, side: int, qty: float, ref_price: float, client_id: str,
+                     **kw) -> Fill: ...
+    # kw: stop_dist / target_dist (price distance from the FILL, for a server-side bracket), ticker (real
+    #     market symbol), conv (USD per unit of the quote currency)
 
     @abstractmethod
-    def market_exit(self, symbol: str, side: int, qty: float, ref_price: float, client_id: str) -> Fill: ...
+    def market_exit(self, symbol: str, side: int, qty: float, ref_price: float, client_id: str, **kw) -> Fill: ...
 
     def sync_positions(self) -> Optional[Dict[str, float]]:
         """{symbol: signed qty} as the broker sees it, or None if the broker cannot tell."""
@@ -55,8 +58,8 @@ class PaperBroker(Broker):
             return Fill(False, reason=f"invalid order qty={qty} price={ref_price}")
         return Fill(True, price=float(ref_price), qty=float(qty), order_id=client_id)
 
-    def market_entry(self, symbol, side, qty, ref_price, client_id):
+    def market_entry(self, symbol, side, qty, ref_price, client_id, **kw):
         return self._fill(symbol, qty, ref_price, client_id)
 
-    def market_exit(self, symbol, side, qty, ref_price, client_id):
+    def market_exit(self, symbol, side, qty, ref_price, client_id, **kw):
         return self._fill(symbol, qty, ref_price, client_id)

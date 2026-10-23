@@ -569,7 +569,7 @@ class Runtime:
             return
         cid = f"{ss.cfg.symbol}-x-{int(now)}"
         try:
-            fill = self.broker.market_exit(ss.cfg.symbol, pos.side, pos.qty, ref, cid)
+            fill = self.broker.market_exit(ss.cfg.symbol, pos.side, pos.qty, ref, cid, ticker=ss.cfg.ticker)
         except Exception as e:                                # a broker bug must never lose the position
             fill = Fill(False, reason=f"{type(e).__name__}: {e}")
         if not fill.ok:
@@ -704,13 +704,20 @@ class Runtime:
             return
         cid = f"{sym}-{pd_.signal_ts:%Y%m%d%H%M}"
         try:
-            fill = self.broker.market_entry(sym, plan.side, plan.qty, px, cid)
+            fill = self.broker.market_entry(sym, plan.side, plan.qty, px, cid, stop_dist=plan.stop_dist,
+                                            target_dist=plan.target_dist, ticker=ss.cfg.ticker,
+                                            conv=ss.cfg.usd_per_quote(px))
         except Exception as e:
             fill = Fill(False, reason=f"{type(e).__name__}: {e}")
         ss.pending = None
         if not fill.ok:
             self.n.send(f"{sym}: ENTRY REJECTED: {fill.reason}", level=logging.ERROR)
             return
+        if fill.qty > 0 and abs(fill.qty - plan.qty) > 1e-9:          # broker rounded to its lot step / min lot
+            conv = ss.cfg.usd_per_quote(fill.price)
+            plan = dc_replace(plan, qty=fill.qty, risk_amt=fill.qty * plan.stop_dist * conv)
+            if fill.reason:
+                self.n.send(f"{sym}: {fill.reason}")
         pos = ss.eng.open_position(plan, fill.price, opened_epoch=now, client_id=cid)
         self._save(now, force=True)                            # position on disk BEFORE anything else
         self.n.send(f"ENTRY {sym} {'LONG' if pos.side == 1 else 'SHORT'} qty={pos.qty} @ {pos.entry:.4f} "
@@ -826,6 +833,7 @@ class Runtime:
                 fx_market = {"open": False, "text": f"الذهب والعملات: مغلق - يفتح {days[o.weekday()]} {o:%H:%M} بغداد"}
         return {"time_utc": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
                 "market": market, "fx_market": fx_market, "mode": self.mode, "credits": self._credits(),
+                "execution": self.broker.describe() if hasattr(self.broker, "describe") else {"mode": "paper"},
                 "equity": round(a.equity, 2), "day_start_equity": round(a.day_start_equity, 2),
                 "trades_today": a.trades_today, "consec_losses": a.consec_losses,
                 "stop_file": os.path.exists(self.stop_file), "flatten_file": os.path.exists(self.flatten_file),
@@ -955,7 +963,10 @@ def main() -> None:
                               level=logging.WARNING)
     providers = make_providers(p, symbols)
     executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="io")
-    rt = Runtime(p, symbols, providers, PaperBroker(), store, notifier, executor, mode=mode, gate=True,
+    import ctrader
+    _eq = {"rt": None}
+    broker = ctrader.from_env(lambda: _eq["rt"].acct.equity if _eq["rt"] else 0.0) or PaperBroker()
+    rt = Runtime(p, symbols, providers, broker, store, notifier, executor, mode=mode, gate=True,
                  classes=wl.class_of(items))
 
     for note in store.notes:
@@ -966,8 +977,26 @@ def main() -> None:
         except Exception as e:
             notifier.send(f"STATE WARNING: could not apply saved state ({type(e).__name__}: {e}) - "
                           f"starting fresh; CHECK for open positions manually", level=logging.ERROR)
-            rt = Runtime(p, symbols, providers, PaperBroker(), store, notifier, executor, mode=mode, gate=True,
+            rt = Runtime(p, symbols, providers, broker, store, notifier, executor, mode=mode, gate=True,
                  classes=wl.class_of(items))
+    _eq["rt"] = rt
+    if hasattr(broker, "live"):                               # cTrader demo: compare with the broker at startup
+        try:
+            at_broker = broker.sync_positions()
+            if at_broker is not None:
+                mine = {ss.cfg.symbol for ss in rt.syms if ss.eng.pos and ss.cfg.ticker in broker.live_tickers}
+                for lab in set(at_broker) - mine:
+                    notifier.send(f"cTrader: position {lab} exists at the broker but not in the bot - check it in "
+                                  f"the cTrader app (it keeps its server-side stop/target)", level=logging.WARNING)
+                for lab in mine - set(at_broker):
+                    notifier.send(f"cTrader: {lab} is open in the bot but already closed at the broker "
+                                  f"(server stop/target hit while the bot was down) - will be booked on next price",
+                                  level=logging.WARNING)
+            else:
+                notifier.send(f"cTrader: not reachable at startup ({broker.live.c.last_error}) - retrying every 30 s",
+                              level=logging.WARNING)
+        except Exception as e:
+            notifier.send(f"cTrader reconcile error: {type(e).__name__}: {e}", level=logging.WARNING)
     off = wl.disabled_ids(items)
     for ss in rt.syms:
         ss.disabled = ss.cfg.symbol in off
@@ -1006,7 +1035,7 @@ def main() -> None:
         if sig is not None:
             signal.signal(sig, _bye)
 
-    notifier.send(f"Bot started (PAPER). watchlist streams={[s.symbol for s in symbols]} equity={rt.acct.equity:.2f} "
+    notifier.send(f"Bot started ({getattr(broker, 'name', 'paper')}). watchlist streams={[s.symbol for s in symbols]} equity={rt.acct.equity:.2f} "
                   f"providers={{{', '.join(f'{s.symbol}: bars={s.provider} quotes={s.quote_src}' for s in symbols)}}}")
     try:
         rt.run()
