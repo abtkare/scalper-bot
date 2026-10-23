@@ -52,7 +52,7 @@ class RemoteLink:
         self.topic, self.token = topic, token
         self.status_fn, self.command_fn, self.restart_fn = status_fn, command_fn, restart_fn
         self.alerts: deque = deque(maxlen=200)
-        self.since = str(int(time.time()))
+        self.seen: deque = deque(maxlen=500)              # message ids already executed (exactly-once)
         self.sess = requests.Session()
 
     @property
@@ -109,7 +109,7 @@ class RemoteLink:
         self.sess.post(f"{BASE}/{self.topic}-{suffix}", data=msg.encode("utf-8"), headers=hdr, timeout=(5, 10))
 
     def _poll_commands(self) -> None:
-        r = self.sess.get(f"{BASE}/{self.topic}-c/json", params={"poll": "1", "since": self.since}, timeout=(5, 15))
+        r = self.sess.get(f"{BASE}/{self.topic}-c/json", params={"poll": "1", "since": "3m"}, timeout=(5, 15))
         for line in r.text.splitlines():
             try:
                 m = json.loads(line)
@@ -117,7 +117,12 @@ class RemoteLink:
                 continue
             if m.get("event") != "message":
                 continue
-            self.since = m.get("id", self.since)
+            mid = m.get("id")
+            if mid in self.seen:
+                continue                                       # ntfy may re-deliver: run each command once
+            self.seen.append(mid)
+            if time.time() - float(m.get("time", 0)) > 120:
+                continue                                       # stale command (e.g. sent while the bot was down)
             reply = self.handle(m.get("message", ""))
             if reply:
                 cmd = m.get("message", "").split()[0]
