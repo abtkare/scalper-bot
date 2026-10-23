@@ -35,4 +35,30 @@ rl2.sess.get = lambda *a, **k: R([{"event": "message", "id": "r1", "time": now, 
 rl2._poll_commands()
 assert not any(c.startswith("AFTER-RESTART") for c in calls), calls
 print("  ok  a restarted bot never re-runs commands sent before it started (no restart loop)")
+
+# diagnose: read-only report from the real log file, secrets redacted, fits one ntfy message
+import logging, os, tempfile
+from logging.handlers import RotatingFileHandler
+d = tempfile.mkdtemp()
+lp = os.path.join(d, "bot.log")
+with open(lp, "w", encoding="utf-8") as f:
+    for i in range(300):
+        f.write(f"2026-10-23 INFO bot: hb line {i} " + "x" * 60 + "\n")
+    f.write("2026-10-23 WARNING infra: XAU/USD: signal skipped - too late (31s after the bar open)\n")
+    f.write("2026-10-23 WARNING infra: QQQ: bar error #1 -> rate: 429 apikey=SECRETKEY123456\n")
+fh = RotatingFileHandler(lp); logging.getLogger().addHandler(fh)
+before = open(lp, encoding="utf-8").read()
+os.environ["TWELVE_DATA_API_KEY"] = "SECRETKEY123456"
+st = {"credits": {"used": 8, "cap": 800}, "symbols": {"QQQ": {"ticker": "QQQ", "trading": True},
+                                                       "DIA-SCALP": {"ticker": "DIA", "trading": False}}}
+rl3 = RemoteLink("t" * 20, "k" * 20, lambda: st, lambda c: "ok", lambda: calls.append("RESTART3"))
+rep = rl3.handle("diagnose " + "k" * 20)
+logging.getLogger().removeHandler(fh); fh.close()
+assert rep.startswith("[DIAG "), rep[:80]
+assert "SECRETKEY123456" not in rep, "secret leaked"
+assert "DIA=نعم" in rep and "8/800" in rep and "too late" in rep and "429=1" in rep and "error #=1" in rep, rep
+assert len(rep) <= 3500 and len(("diagnose: " + rep).encode("utf-8")) <= 4096
+assert open(lp, encoding="utf-8").read() == before and "RESTART3" not in calls
+assert rl3.handle("diagnose WRONG") == ""
+print("  ok  diagnose: read-only, no secrets, fits one ntfy message, wrong token ignored")
 print("\nall remote tests passed")

@@ -105,7 +105,123 @@ class RemoteLink:
             return "restarting (will load the latest code from GitHub)"
         if cmd in ("stop", "start", "flatten", "halt", "resume", "status"):
             return self.command_fn("/" + cmd)
+        if cmd == "diagnose":
+            try:
+                return self._build_diagnose_report()
+            except Exception as e:
+                return f"diagnose failed: {type(e).__name__}: {e}"
         return ""
+
+    # ------------------------------------------------------------ diagnose (READ-ONLY)
+    DIAG_MAX_CHARS = 3500
+    DIAG_MAX_BYTES = 3900          # ntfy.sh message limit is 4096 bytes (Arabic = 2 bytes/char)
+    _DIAG_ERR = ("429", "rate", "credits", "quota", "Forbidden", "Unauthorized", "error #")
+    _DIAG_LATE = ("signal skipped", "too late")
+
+    @staticmethod
+    def _log_path() -> str:
+        """Path of the file the bot really logs to (infra.setup_logging -> /data/bot.log in the container)."""
+        from logging.handlers import RotatingFileHandler
+        for h in logging.getLogger().handlers:
+            if isinstance(h, RotatingFileHandler):
+                return h.baseFilename
+        return os.path.abspath("bot.log")
+
+    def _build_diagnose_report(self) -> str:
+        """Read-only snapshot for remote debugging. Never writes, never changes state, never shows secrets."""
+        import hashlib
+        import subprocess
+        from datetime import datetime, timezone
+        na = "غير متاح: "
+        out = [f"[DIAG {datetime.now(timezone.utc).isoformat(timespec='seconds')}]"]
+
+        # 1) COMMIT
+        code_dir = os.path.dirname(os.path.abspath(__file__))
+        try:
+            r = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=code_dir, capture_output=True,
+                               text=True, timeout=5)
+            if r.returncode != 0:
+                raise RuntimeError((r.stderr or "not a git checkout").strip()[:80])
+            out.append(f"1) COMMIT: {r.stdout.strip()}")
+        except Exception as e:
+            fp = []
+            for f in ("bot.py", "remote.py", "providers.py", "strategy.py"):
+                try:
+                    with open(os.path.join(code_dir, f), "rb") as fh:
+                        fp.append(f"{f}={hashlib.sha256(fh.read()).hexdigest()[:10]}")
+                except OSError:
+                    fp.append(f"{f}=?")
+            out.append(f"1) COMMIT: {na}{type(e).__name__}: {e} | code={code_dir} | sha256 {' '.join(fp)}")
+
+        # 2) MODE (values of non-secret settings; secrets only as present/absent)
+        def env(k: str) -> str:
+            v = os.getenv(k)
+            return "غير موجود" if v is None else (v.strip() or "(فارغ)")
+        sec = {k: ("موجود" if os.getenv(k) else "غير موجود")
+               for k in ("TWELVE_DATA_API_KEY", "DASHBOARD_PASSWORD", "CTRADER_CLIENT_SECRET")}
+        out.append(f"2) MODE: MODE={env('MODE')} PAPER_TRADING={env('PAPER_TRADING')} "
+                   f"TRADING_MODE={env('TRADING_MODE')} EXECUTION={env('EXECUTION')} EVENT_BRAKE={env('EVENT_BRAKE')} "
+                   f"| " + " ".join(f"{k}:{v}" for k, v in sec.items()))
+
+        # 3) WATCHLIST
+        try:
+            st = self.status_fn() or {}
+            syms = st.get("symbols") or {}
+            if not syms:
+                raise RuntimeError("status has no symbols")
+            tr = [k for k, v in syms.items() if v.get("trading")]
+            dia = any((v.get("ticker") or k).split("-")[0] == "DIA" for k, v in syms.items())
+            out.append(f"3) WATCHLIST: {len(syms)} lines, DIA={'نعم' if dia else 'لا'}, tradable={','.join(tr) or '-'}")
+            out.append(f"   order: {','.join(syms)}")
+        except Exception as e:
+            st = {}
+            out.append(f"3) WATCHLIST: {na}{type(e).__name__}: {e}")
+
+        # 4) ERRORS + 5) LATE + 7) TAIL - one pass over the current log file
+        path = self._log_path()
+        lines, counts, late, log_err = [], {k: 0 for k in self._DIAG_ERR}, [], ""
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for ln in fh:
+                    ln = ln.rstrip("\n")
+                    for k in self._DIAG_ERR:
+                        if k in ln:
+                            counts[k] += 1
+                    if any(k in ln for k in self._DIAG_LATE):
+                        late.append(ln)
+                    lines.append(ln)
+                    if len(lines) > 400:
+                        del lines[:200]
+        except Exception as e:
+            log_err = f"{type(e).__name__}: {e}"
+        if log_err:
+            out.append(f"4) ERRORS: {na}{log_err}")
+            out.append(f"5) LATE: {na}{log_err}")
+        else:
+            out.append(f"4) ERRORS ({path}): " + " ".join(f"{k}={v}" for k, v in counts.items()))
+            out.append("5) LATE: " + (f"{len(late)} total" if late else "0"))
+            out.extend("   " + redact(x)[:200] for x in late[-10:])
+
+        # 6) QUOTA
+        cr = (st or {}).get("credits")
+        out.append(f"6) QUOTA: {(cr or {}).get('used', 'غير متاح')}/{(cr or {}).get('cap', '-')} "
+                   f"(UTC day; RAM only - resets on every restart; process up {(time.time() - self.boot) / 60:.0f} min)")
+
+        # 7) TAIL - drop the OLDEST lines first until the message fits
+        head = "\n".join(out)
+        if log_err:
+            return self._fit(head + f"\n7) TAIL: {na}{log_err}")
+        tail = [redact(x)[:240] for x in lines[-40:]]
+        while True:
+            msg = head + f"\n7) TAIL (last {len(tail)}):\n" + "\n".join(tail)
+            if (len(msg) <= self.DIAG_MAX_CHARS and len(msg.encode("utf-8")) <= self.DIAG_MAX_BYTES) or not tail:
+                return self._fit(msg)
+            tail.pop(0)
+
+    def _fit(self, msg: str) -> str:
+        while len(msg) > self.DIAG_MAX_CHARS or len(msg.encode("utf-8")) > self.DIAG_MAX_BYTES:
+            msg = msg[:-50]
+        return msg
 
     # ------------------------------------------------------------ network
     def _pub(self, suffix: str, msg: str, title: str = "", prio: int = 3, tags: str = "") -> None:
