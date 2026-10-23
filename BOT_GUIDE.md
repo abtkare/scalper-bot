@@ -95,7 +95,7 @@ GitHub (main)  ──عند كل تشغيل للحاوية──▶  boot.py ي�
 | `news.py` | نافذة الأخبار (v10): ترامب، البيت الأبيض، الفيدرالي، المركزي الأوروبي، بنك إنجلترا، بنك اليابان، EIA، Investing.com + الأجندة الاقتصادية — مترجمة للعربية، تنبيه للمهم. لا تفتح ولا تغلق صفقات |
 | `prices.py` | شريط الأسعار الحي أعلى اللوحة: ذهب، فضة، بلاتين، نحاس، نفط WTI/برنت، مؤشر الدولار، العملات، الدينار، البيتكوين، عائد السندات |
 | `dashboard.py` | لوحة التحكم |
-| `remote.py` | قناة ntfy (حالة كل دقيقة، تنبيهات، أوامر) |
+| `remote.py` | قناة ntfy (حالة كل 10 دقائق، تنبيهات، أوامر). ntfy.sh المجاني يقبل ~250 رسالة يومياً فقط: الحالة تتوقف عند 144، الأخبار عند 192، الصفقات والأخطاء حتى 240. الحقل `nt` = [المرسل اليوم، المحذوف] |
 | `backtest.py` | الاختبار التاريخي (`--mode qqq|fx|scalp|all`) |
 | `research/` | أدوات البحث وتقرير البوابة `qualify_report.py` |
 | `test_*.py` | 8 مجموعات اختبار (يجب أن تنجح كلها قبل أي رفع) |
@@ -109,7 +109,7 @@ GitHub (main)  ──عند كل تشغيل للحاوية──▶  boot.py ي�
 ### أ) عبر Claude (الطريقة المعتادة)
 1. في المحادثة الجديدة يطلب Claude صلاحية الرفع على المستودع (`abtkare/scalper-bot`) — وافق على رسالة الصلاحية إن ظهرت.
 2. Claude يعدّل الكود، يشغّل **كل الاختبارات**:
-   `python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py && python test_watchlist.py && python test_ctrader.py && python test_structure.py && python test_news.py && python test_prices.py && python test_quota.py`
+   `python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py && python test_watchlist.py && python test_ctrader.py && python test_structure.py && python test_news.py && python test_prices.py && python test_quota.py && python test_ntfy.py`
 3. يرفع على فرع `main`.
 4. إعادة التشغيل لتحميل الكود (أي طريقة):
    - **لوحة التحكم ← 🔄 تحديث البوت من GitHub** (الأسهل)، أو

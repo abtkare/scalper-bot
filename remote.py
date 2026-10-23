@@ -2,9 +2,14 @@
 without opening ports, SSH or a domain.
 
 Topics (NTFY_TOPIC is a long random secret - knowing it is the first key, MONITOR_TOKEN the second):
-  <topic>-s   status snapshot every 60 s (compact JSON)             -> read by the monitor
+  <topic>-s   status snapshot every NTFY_STATUS_SEC (600 s) (compact JSON) -> read by the monitor
   <topic>-a   alerts: entries, exits, guardian interventions, errors -> subscribe in the ntfy phone app
   <topic>-c   commands: "<cmd> <MONITOR_TOKEN>"                      -> stop|start|flatten|halt|resume|restart|ping
+
+ntfy.sh (anonymous) accepts ~250 messages/day per server IP; above that EVERY publish gets HTTP 429 and the
+link goes silent until the quota resets. So publishing is budgeted per UTC day (NTFY_DAILY_CAP, default 240):
+status snapshots stop at 60% of it, news/agenda alerts (📰 📅) at 80%, the rest (trades, guardian, errors,
+command replies) may use all of it. A 429 pauses publishing 15 min; queued alerts are kept, not lost.
 
 "restart" saves state and exits; Docker restarts the container, which downloads the latest code from GitHub
 (see docker-entrypoint.sh) - that is how fixes reach the server without anyone touching it.
@@ -26,6 +31,9 @@ from data import redact
 
 log = logging.getLogger("remote")
 BASE = os.getenv("NTFY_BASE", "https://ntfy.sh")
+STATUS_EVERY = float(os.getenv("NTFY_STATUS_SEC", "600"))
+DAILY_CAP = int(os.getenv("NTFY_DAILY_CAP", "240"))
+TIER_FRAC = {"status": 0.60, "info": 0.80, "alert": 1.0}
 
 
 class _AlertHandler(logging.Handler):
@@ -55,6 +63,15 @@ class RemoteLink:
         self.seen: deque = deque(maxlen=500)              # message ids already executed (exactly-once)
         self.boot = time.time()                            # commands sent before this process started are ignored
         self.sess = requests.Session()
+        self.pub_day, self.sent_today, self.dropped_today = "", 0, 0
+        self.block_until = 0.0                             # after an ntfy 429: no publishing until then
+
+    def _allow(self, tier: str) -> bool:
+        """Daily publish budget (ntfy.sh anonymous limit). Resets at 00:00 UTC."""
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        if day != self.pub_day:
+            self.pub_day, self.sent_today, self.dropped_today = day, 0, 0
+        return self.sent_today < DAILY_CAP * TIER_FRAC.get(tier, 1.0)
 
     @property
     def enabled(self) -> bool:
@@ -91,6 +108,7 @@ class RemoteLink:
                 "fw": {k: [f.get("n"), f.get("w"), f.get("sumR"), f.get("pnl")]
                        for k, v in (st.get("symbols") or {}).items() for f in [v.get("fw") or {}] if f.get("n")},
                 "off": {k: v.get("auto_off") for k, v in (st.get("symbols") or {}).items() if v.get("auto_off")},
+                "nt": [self.sent_today, self.dropped_today],          # ntfy messages sent / dropped today
                 "cr": {k: v for k, v in (st.get("credits") or {}).items() if k in ("used", "cap", "health")} or None}
 
     def handle(self, text: str) -> str:
@@ -252,13 +270,24 @@ class RemoteLink:
         return msg
 
     # ------------------------------------------------------------ network
-    def _pub(self, suffix: str, msg: str, title: str = "", prio: int = 3, tags: str = "") -> None:
+    def _pub(self, suffix: str, msg: str, title: str = "", prio: int = 3, tags: str = "") -> bool:
         hdr = {"Priority": str(prio)}
         if title:
             hdr["Title"] = title.encode("utf-8").decode("latin-1", "ignore") or "bot"
         if tags:
             hdr["Tags"] = tags
-        self.sess.post(f"{BASE}/{self.topic}-{suffix}", data=msg.encode("utf-8"), headers=hdr, timeout=(5, 10))
+        r = self.sess.post(f"{BASE}/{self.topic}-{suffix}", data=msg.encode("utf-8"), headers=hdr, timeout=(5, 10))
+        code = getattr(r, "status_code", 200)
+        if code == 429:
+            self.block_until = time.time() + 900
+            log.warning("ntfy refused a message (429: daily/burst limit) - publishing paused 15 min "
+                        "(sent today: %d)", self.sent_today)
+            return False
+        if code >= 400:
+            log.warning("ntfy publish failed: HTTP %s", code)
+            return False
+        self.sent_today += 1
+        return True
 
     def _poll_commands(self) -> None:
         r = self.sess.get(f"{BASE}/{self.topic}-c/json", params={"poll": "1", "since": "3m"}, timeout=(5, 15))
@@ -280,20 +309,35 @@ class RemoteLink:
             if reply:
                 cmd = m.get("message", "").split()[0]
                 log.warning("remote command %s", cmd)
-                self._pub("a", f"{cmd}: {reply}", title="command", prio=4, tags="robot")
+                self.alerts.appendleft((logging.ERROR, f"{cmd}: {reply}", "command"))   # sent by _loop, first
+
+    def _flush_alerts(self) -> None:
+        """Oldest first; a refused/failed publish keeps the alert queued for the next round."""
+        while self.alerts and time.time() >= self.block_until:
+            item = self.alerts[0]
+            lvl, msg = item[0], item[1]
+            title = item[2] if len(item) > 2 else ""
+            tier = "alert" if title else "info" if msg.startswith(("📰", "📅")) else "alert"
+            if not self._allow(tier):
+                self.alerts.popleft()
+                self.dropped_today += 1
+                continue
+            prio = 5 if lvl >= logging.CRITICAL else 4 if lvl >= logging.ERROR else 3
+            tags = "robot" if title else "warning" if lvl >= logging.WARNING else "chart_with_upwards_trend"
+            if not self._pub("a", msg, title=title, prio=prio, tags=tags):
+                return
+            self.alerts.popleft()
 
     def _loop(self) -> None:
         last_status = 0.0
         while True:
             try:
                 self._poll_commands()
-                while self.alerts:
-                    lvl, msg = self.alerts.popleft()
-                    prio = 5 if lvl >= logging.CRITICAL else 4 if lvl >= logging.ERROR else 3
-                    self._pub("a", msg, prio=prio, tags="warning" if lvl >= logging.WARNING else "chart_with_upwards_trend")
-                if time.time() - last_status >= 60:
-                    self._pub("s", json.dumps(self.compact_status(), default=str, ensure_ascii=False), prio=1)
+                self._flush_alerts()
+                if time.time() - last_status >= STATUS_EVERY and time.time() >= self.block_until:
                     last_status = time.time()
+                    if self._allow("status"):
+                        self._pub("s", json.dumps(self.compact_status(), default=str, ensure_ascii=False), prio=1)
             except Exception as e:
                 log.debug("remote link error: %s", redact(f"{type(e).__name__}: {e}"))
             time.sleep(10)
