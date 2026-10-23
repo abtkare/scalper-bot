@@ -91,7 +91,7 @@ class RemoteLink:
                 "fw": {k: [f.get("n"), f.get("w"), f.get("sumR"), f.get("pnl")]
                        for k, v in (st.get("symbols") or {}).items() for f in [v.get("fw") or {}] if f.get("n")},
                 "off": {k: v.get("auto_off") for k, v in (st.get("symbols") or {}).items() if v.get("auto_off")},
-                "cr": st.get("credits")}
+                "cr": {k: v for k, v in (st.get("credits") or {}).items() if k in ("used", "cap", "health")} or None}
 
     def handle(self, text: str) -> str:
         parts = (text or "").strip().split()
@@ -136,7 +136,7 @@ class RemoteLink:
         """Read-only snapshot for remote debugging. Never writes, never changes state, never shows secrets."""
         import hashlib
         import subprocess
-        from datetime import datetime, timezone
+        from datetime import datetime, timedelta, timezone
         na = "غير متاح: "
         out = [f"[DIAG {datetime.now(timezone.utc).isoformat(timespec='seconds')}]"]
 
@@ -224,13 +224,15 @@ class RemoteLink:
             out.extend("   " + redact(x)[:200] for x in late[-10:])
 
         # 6) QUOTA
-        cr = (st or {}).get("credits")
-        now_utc = datetime.now(timezone.utc)
-        midnight = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-        reset = max(self.boot, midnight)                     # counter = RAM: zeroed at process start + UTC midnight
-        out.append(f"6) QUOTA: {(cr or {}).get('used', 'غير متاح')}/{(cr or {}).get('cap', '-')} "
-                   f"RAM only | reset_at={datetime.fromtimestamp(reset, timezone.utc):%Y-%m-%d %H:%M:%S}Z "
-                   f"({'process start' if reset == self.boot else 'UTC midnight'}, {(time.time() - reset) / 60:.0f} min ago)")
+        cr = (st or {}).get("credits") or {}                 # providers.RateBudget.quota_status() via bot._credits
+        nxt = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        used, cap = cr.get("used", "غير متاح"), cr.get("cap", "-")
+        out.append(f"6) QUOTA: provider={cr.get('provider') or 'twelvedata'}, count={used}, soft={cr.get('soft', '-')}, "
+                   f"hard={cr.get('hard', '-')}, max={cap}, health={cr.get('health', '-')}, "
+                   f"source={cr.get('source', 'memory')}, file={cr.get('file') or '-'}, "
+                   f"reset_at={cr.get('reset_at') or nxt.strftime('%Y-%m-%dT%H:%M:%SZ')} "
+                   f"({used}/{cap}, journal={cr.get('journal') or '-'}"
+                   + (f", error={cr['error']}" if cr.get("error") else "") + ")")
 
         # 7) TAIL - drop the OLDEST lines first until the message fits
         head = "\n".join(out)

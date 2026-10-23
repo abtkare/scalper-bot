@@ -77,7 +77,7 @@
 ```
 GitHub (main)  ──عند كل تشغيل للحاوية──▶  boot.py ينزّل أحدث كود ▶ يثبت المكتبات ▶ test_engine.py ▶ bot.py
                                           (إن فشل الاختبار: يعمل بآخر نسخة سليمة /data/app_good)
-الحالة الدائمة: /data  (state.json, trades_live.csv, watchlist.json, ctrader_tokens.json, bot.log)
+الحالة الدائمة: /data  (state.json, trades_live.csv, watchlist.json, ctrader_tokens.json, bot.log, quota.db)
 ```
 | الملف | الوظيفة |
 |---|---|
@@ -101,13 +101,15 @@ GitHub (main)  ──عند كل تشغيل للحاوية──▶  boot.py ي�
 | `test_*.py` | 8 مجموعات اختبار (يجب أن تنجح كلها قبل أي رفع) |
 | `RESEARCH.md` · `README.md` · `DEVELOPMENT.md` | البحث، الملخص، دليل المطور |
 
+**عدّاد رصيد Twelve Data** دائم في `/data/quota.db` (SQLite): لا يُصفَّر مع إعادة التشغيل، يبدأ من 0 عند منتصف الليل UTC، ويحتفظ بآخر 7 أيام. الحدود كما هي: المراقبة تتوقف عند 560، الأسطر المتداولة عند 740، الصفقات المفتوحة حتى 800. تنبيه ntfy مرة واحدة يومياً عند 720 و760 و800. إن تعطل الملف يعدّ البوت في الذاكرة ويعيد المحاولة كل 60 ثانية (تنبيه واحد). البند 6 في diagnose: `QUOTA: provider=twelvedata, count=X, soft=560, hard=740, max=800, health=ok|warn|critical|blocked, source=sqlite, file=/data/quota.db, reset_at=<UTC midnight>`.
+
 ---
 
 ## 6) الرفع والتحديث (خطوة بخطوة)
 ### أ) عبر Claude (الطريقة المعتادة)
 1. في المحادثة الجديدة يطلب Claude صلاحية الرفع على المستودع (`abtkare/scalper-bot`) — وافق على رسالة الصلاحية إن ظهرت.
 2. Claude يعدّل الكود، يشغّل **كل الاختبارات**:
-   `python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py && python test_watchlist.py && python test_ctrader.py && python test_structure.py && python test_news.py && python test_prices.py`
+   `python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py && python test_watchlist.py && python test_ctrader.py && python test_structure.py && python test_news.py && python test_prices.py && python test_quota.py`
 3. يرفع على فرع `main`.
 4. إعادة التشغيل لتحميل الكود (أي طريقة):
    - **لوحة التحكم ← 🔄 تحديث البوت من GitHub** (الأسهل)، أو

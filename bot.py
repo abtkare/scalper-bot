@@ -150,6 +150,7 @@ class Runtime:
                               clock=clock, halt_file=os.path.join(os.path.dirname(stop_file), "HALT"))
         self.status_file = os.path.join(os.path.dirname(trades_file), STATUS_FILE)
         self.last_status = 0.0
+        self.quota_degraded_sent = False                         # "persistence degraded" ntfy: once per process
         self.recent_trades: list = []
         self.guard.on_equity(self.acct.equity)
         self.last_alive = clock()
@@ -811,6 +812,10 @@ class Runtime:
         if now - self.last_status >= 15:
             self.last_status = now
             self._write_status(now)
+            try:
+                self._quota_alerts()
+            except Exception:
+                log.exception("quota alert check failed")
 
     def status(self, now: float) -> dict:
         syms = {}
@@ -888,8 +893,33 @@ class Runtime:
         for prov in self.providers.values():
             b = getattr(prov, "budget", None)
             if b is not None and getattr(b, "per_day", 0):
-                return {"used": int(b.used_day), "cap": int(b.per_day)}
+                if not hasattr(b, "quota_status"):
+                    return {"used": int(b.used_day), "cap": int(b.per_day)}
+                return dict(b.quota_status(), provider=prov.name)
         return None
+
+    QUOTA_MSG = {"warn": "{P} quota warning: {used}/{cap} (watch-only scanning already paused at {soft})",
+                 "critical": "{P} near limit: {used}/{cap}",
+                 "blocked": "{P} blocked: {used}/{cap}, no new requests until 00:00 UTC"}
+
+    def _quota_alerts(self) -> None:
+        """Monitoring only: each level (720 / 760 / 800 of 800) is announced once per UTC day, even across
+        restarts. Never changes what the credit budget allows."""
+        for prov in self.providers.values():
+            b = getattr(prov, "budget", None)
+            if b is None or not getattr(b, "per_day", 0) or not hasattr(b, "quota_status"):
+                continue
+            q = b.quota_status()
+            P = prov.name.upper()
+            if q.get("file") and q.get("source") != "sqlite" and not self.quota_degraded_sent:
+                self.quota_degraded_sent = True
+                self.n.send(f"{P}: quota persistence degraded to memory ({q.get('error')}) - retrying every "
+                            f"60 s", level=logging.WARNING)
+            levels = ("warn", "critical", "blocked")
+            reached = levels[:levels.index(q["health"]) + 1] if q["health"] in levels else ()
+            for lvl in reached:
+                if b.alert_once(lvl):
+                    self.n.send(self.QUOTA_MSG[lvl].format(P=P, **q), level=logging.WARNING)
 
     def _write_status(self, now: float) -> None:
         try:
@@ -994,7 +1024,7 @@ def main() -> None:
                 apply_env_overrides(symbols[-1:])
                 notifier.send(f"{sym}: open position on a symbol no longer watched - managed EXIT-ONLY until closed",
                               level=logging.WARNING)
-    providers = make_providers(p, symbols)
+    providers = make_providers(p, symbols, quota_path=os.getenv("QUOTA_DB", "quota.db"))   # /data/quota.db
     executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="io")
     import ctrader
     _eq = {"rt": None}
