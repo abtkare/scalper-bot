@@ -43,20 +43,29 @@ d = tempfile.mkdtemp()
 lp = os.path.join(d, "bot.log")
 with open(lp, "w", encoding="utf-8") as f:
     for i in range(300):
-        f.write(f"2026-10-23 INFO bot: hb line {i} " + "x" * 60 + "\n")
-    f.write("2026-10-23 WARNING infra: XAU/USD: signal skipped - too late (31s after the bar open)\n")
-    f.write("2026-10-23 WARNING infra: QQQ: bar error #1 -> rate: 429 apikey=SECRETKEY123456\n")
+        f.write(f"2026-10-23 04:19:39,429 INFO bot: hb equity=1000.00 line {i} " + "x" * 300 + "\n")
+        f.write(f"2026-10-23 04:19:40,111 INFO bot: other line {i} price=1429.5\n")
+    f.write("2026-10-23 05:00:01,000 WARNING infra: XAU/USD: signal skipped - too late (31s after the bar open)\n")
+    f.write("2026-10-23 05:00:02,000 WARNING infra: QQQ: bar error #1 -> rate: You have run out of API credits apikey=SECRETKEY123456\n")
+    f.write("2026-10-23 05:01:00,429 INFO bot: hb equity=1000.00 LAST " + "y" * 600 + "\n")
 fh = RotatingFileHandler(lp); logging.getLogger().addHandler(fh)
 before = open(lp, encoding="utf-8").read()
 os.environ["TWELVE_DATA_API_KEY"] = "SECRETKEY123456"
 st = {"credits": {"used": 8, "cap": 800}, "symbols": {"QQQ": {"ticker": "QQQ", "trading": True},
-                                                       "DIA-SCALP": {"ticker": "DIA", "trading": False}}}
+                                                       "DIA-SCALP": {"ticker": "DIA", "trading": False}},
+      "bar_queue": ["XAU/USD", "DIA-SCALP"]}
 rl3 = RemoteLink("t" * 20, "k" * 20, lambda: st, lambda c: "ok", lambda: calls.append("RESTART3"))
 rep = rl3.handle("diagnose " + "k" * 20)
 logging.getLogger().removeHandler(fh); fh.close()
 assert rep.startswith("[DIAG "), rep[:80]
 assert "SECRETKEY123456" not in rep, "secret leaked"
-assert "DIA=نعم" in rep and "8/800" in rep and "too late" in rep and "429=1" in rep and "error #=1" in rep, rep
+assert "DIA=نعم" in rep and "8/800" in rep and "too late" in rep, rep
+assert "rate_limit_429=1" in rep and "error #=1" in rep, rep          # timestamps/prices with 429 are NOT counted
+assert "rate_limit_429: first 2026-10-23 05:00:02 | last 2026-10-23 05:00:02" in rep, rep
+assert "heartbeats excluded" in rep and "line 299 x" not in rep, rep  # old heartbeats left out of the tail
+assert rep.rstrip().endswith("y" * 600), rep[-200:]                   # latest heartbeat shown in full, at the end
+assert "reset_at=" in rep and "source: " in rep, rep
+assert "queue_order (bar requests, top of the hour): XAU/USD,DIA-SCALP" in rep, rep
 assert len(rep) <= 3500 and len(("diagnose: " + rep).encode("utf-8")) <= 4096
 assert open(lp, encoding="utf-8").read() == before and "RESTART3" not in calls
 assert rl3.handle("diagnose WRONG") == ""

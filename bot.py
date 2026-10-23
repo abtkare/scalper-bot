@@ -492,6 +492,16 @@ class Runtime:
             self.n.send(f"{ss.cfg.symbol}: no new bar for {overdue/60:.0f} min (data stalled?)",
                         key=f"stale-{ss.cfg.symbol}", every=300, level=logging.WARNING)
 
+    def bar_queue(self) -> list:
+        """Order in which bar requests are scheduled (the credit bucket serves the first callers first):
+        (a) streams with an open position / pending entry, (b) auto-traded streams, (c) watch-only streams.
+        Stable sort -> the watchlist order is kept inside each group. Only the ORDER of data requests changes."""
+        def rank(ss: SymState) -> int:
+            if ss.eng.pos is not None or ss.pending is not None:
+                return 0
+            return 1 if self._trading(ss) else 2
+        return sorted(self.syms, key=rank)
+
     def _on_err(self, ss: SymState, kind: str, e: ProviderError, now: float) -> None:
         ss.errs[kind] += 1
         delay = min(30.0, 2.0 ** min(ss.errs[kind] - 1, 5))
@@ -859,7 +869,8 @@ class Runtime:
                 "equity": round(a.equity, 2), "day_start_equity": round(a.day_start_equity, 2),
                 "trades_today": a.trades_today, "consec_losses": a.consec_losses,
                 "stop_file": os.path.exists(self.stop_file), "flatten_file": os.path.exists(self.flatten_file),
-                "guardian": self.guard.status(now), "symbols": syms, "recent_trades": self.recent_trades[-10:]}
+                "guardian": self.guard.status(now), "symbols": syms, "recent_trades": self.recent_trades[-10:],
+                "bar_queue": [s.cfg.symbol for s in self.bar_queue()]}
 
     def _win_bg(self, ss: SymState, now: float) -> str:
         """Entry windows shown in Baghdad time (follows US/EU daylight-saving changes automatically)."""
@@ -895,8 +906,8 @@ class Runtime:
         now = self.clock() if now is None else now
         self.last_alive = time.time()
         self.flatten_req = os.path.exists(self.flatten_file)
-        for fn in (self._schedule_quote, self._schedule_bars):     # money-at-risk polling first
-            for ss in self.syms:
+        for fn, order in ((self._schedule_quote, self.syms), (self._schedule_bars, self.bar_queue())):
+            for ss in order:                                      # money-at-risk polling first
                 try:
                     fn(ss, now)
                 except Exception:

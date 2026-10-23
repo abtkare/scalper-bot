@@ -34,7 +34,8 @@ CLASS_AR = {"etf": "مؤشر / صندوق", "fx": "عملات", "metal": "معا
 
 DEFAULT: List[dict] = [
     {"symbol": "QQQ", "class": "etf", "strategies": ["breakout", "scalp"]},
-    {"symbol": "DIA", "class": "etf", "strategies": ["scalp", "breakout"]},       # Dow Jones ETF
+    # DIA (Dow Jones ETF) removed 2026-10-23: monitoring-only, delays XAU/USD at hourly bar requests,
+    # risk of missing 20s entry window. It can still be added back from the dashboard (+ Add symbol).
     {"symbol": "XAU/USD", "class": "metal", "strategies": ["rsi2", "scalp"]},
     {"symbol": "EUR/USD", "class": "fx", "strategies": ["rsi2", "scalp"]},
     {"symbol": "GBP/USD", "class": "fx", "strategies": ["rsi2", "scalp"]},

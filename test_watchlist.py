@@ -55,7 +55,10 @@ def test_file_ops():
     d = tempfile.mkdtemp()
     f = os.path.join(d, "wl.json")
     items = wl.load(f)
-    assert [e["symbol"] for e in items][:3] == ["QQQ", "DIA", "XAU/USD"]       # defaults when no file
+    assert [e["symbol"] for e in items][:3] == ["QQQ", "XAU/USD", "EUR/USD"]   # defaults when no file
+    assert "DIA" not in [e["symbol"] for e in items]                          # removed 2026-10-23
+    ids = [c.symbol for c in wl.streams(items)]
+    assert len(ids) == 14 and ids[2] == "XAU/USD", ids                        # gold served right after QQQ
     items = wl.add_symbol(items, "spy", None, ["scalp", "breakout"])
     wl.save(items, f)
     items = wl.load(f)
@@ -278,6 +281,47 @@ def test_forward_kill_switch():
     cs = link.compact_status()
     assert "fw" in cs and "q" in cs and "tr" in cs
     ok("forward kill-switch: 20 real paper trades averaging < -0.05R switch a stream off (persisted); owner can re-enable")
+
+
+def test_bar_queue_priority():
+    """Bar requests: (a) open position / pending entry, (b) auto-traded, (c) watch-only - the credit bucket serves
+    the first callers first, so a watch-only line must never delay gold / EUR/USD at the top of the hour."""
+    from broker import PaperBroker
+    from infra import StateStore
+
+    class Prov:
+        budget = None
+    old16 = wl.streams([wl.validate_entry(e) for e in [{"symbol": "QQQ", "class": "etf", "strategies": ["breakout", "scalp"]},
+                                                       {"symbol": "DIA", "class": "etf", "strategies": ["scalp", "breakout"]}]
+                        + wl.DEFAULT[1:]])
+    tmp = tempfile.mkdtemp()
+    rt = bot.Runtime(Params(), old16, {"twelvedata": Prov(), "binance": Prov()}, PaperBroker(),
+                     StateStore(os.path.join(tmp, "s.json")), tr.Rec(), tr.SyncExecutor(), gate=True,
+                     stop_file=os.path.join(tmp, "STOP"), flatten_file=os.path.join(tmp, "FLATTEN"),
+                     trades_file=os.path.join(tmp, "t.csv"))
+    for sid in ("QQQ", "QQQ-SCALP", "XAU/USD", "EUR/USD"):
+        rt.by_name[sid].qual = {"status": "ok", "at": time.time()}
+    for sid in rt.by_name:
+        rt.by_name[sid].next_qual_try = 1e18
+    ids = [s.cfg.symbol for s in rt.syms]
+    assert ids.index("DIA-SCALP") < ids.index("XAU/USD")                       # the old watchlist order
+    q = [s.cfg.symbol for s in rt.bar_queue()]
+    assert q[:4] == ["QQQ", "QQQ-SCALP", "XAU/USD", "EUR/USD"], q              # traded first, in watchlist order
+    assert q.index("XAU/USD") < q.index("DIA-SCALP") and q.index("EUR/USD") < q.index("DIA-BRK"), q
+    rt.by_name["GBP/USD"].eng.pos = object()                                   # watch-only line holding a position
+    q = [s.cfg.symbol for s in rt.bar_queue()]
+    assert q[0] == "GBP/USD" and q.index("GBP/USD") < q.index("USD/JPY"), q
+    called = []                                                                # step() really uses this order
+    rt._schedule_bars = lambda ss, now: called.append(ss.cfg.symbol)
+    for name in ("_schedule_quote", "_schedule_qual"):
+        setattr(rt, name, lambda ss, now: None)
+    for name in ("_harvest_qual", "_harvest", "_guards", "_housekeeping"):
+        setattr(rt, name, lambda now: None)
+    rt.step(time.time())
+    assert called == q, (called, q)
+    rt.by_name["GBP/USD"].eng.pos = None
+    assert rt.status(time.time())["bar_queue"][:3] == ["QQQ", "QQQ-SCALP", "XAU/USD"]
+    ok("bar queue: open position > auto-traded > watch-only; XAU/USD + EUR/USD requested before DIA-SCALP/DIA-BRK")
 
 
 if __name__ == "__main__":

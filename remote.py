@@ -115,7 +115,12 @@ class RemoteLink:
     # ------------------------------------------------------------ diagnose (READ-ONLY)
     DIAG_MAX_CHARS = 3500
     DIAG_MAX_BYTES = 3900          # ntfy.sh message limit is 4096 bytes (Arabic = 2 bytes/char)
-    _DIAG_ERR = ("429", "rate", "credits", "quota", "Forbidden", "Unauthorized", "error #")
+    # Patterns match the bot's REAL error lines (bot._on_err: "<SYM>: <kind> error #N -> <kind>: <msg>").
+    # A Twelve Data 429 is logged as "error #N -> rate: <provider text>" - the text does not contain "429",
+    # so a bare "429" only ever matched digits inside timestamps/prices.
+    _DIAG_ERR = {"rate_limit_429": r"error #\d+ -> rate:", "credits": r"\bcredits\b", "quota": r"\bquota\b",
+                 "Forbidden": r"\bForbidden\b", "Unauthorized": r"\bUnauthorized\b",
+                 "auth": r"DATA API AUTH ERROR", "error #": r"\berror #\d+"}
     _DIAG_LATE = ("signal skipped", "too late")
 
     @staticmethod
@@ -173,22 +178,37 @@ class RemoteLink:
             dia = any((v.get("ticker") or k).split("-")[0] == "DIA" for k, v in syms.items())
             out.append(f"3) WATCHLIST: {len(syms)} lines, DIA={'نعم' if dia else 'لا'}, tradable={','.join(tr) or '-'}")
             out.append(f"   order: {','.join(syms)}")
+            q = st.get("bar_queue")
+            out.append(f"   queue_order (bar requests, top of the hour): {','.join(q) if q else 'غير متاح: old bot.py'}")
+            import watchlist as _wl
+            src = os.path.abspath(_wl.WATCHLIST_FILE)
+            out.append(f"   source: {'file ' + src if os.path.exists(src) else 'default list in watchlist.py (no file)'}")
         except Exception as e:
             st = {}
             out.append(f"3) WATCHLIST: {na}{type(e).__name__}: {e}")
 
         # 4) ERRORS + 5) LATE + 7) TAIL - one pass over the current log file
         path = self._log_path()
-        lines, counts, late, log_err = [], {k: 0 for k in self._DIAG_ERR}, [], ""
+        import re
+        pats = {k: re.compile(v) for k, v in self._DIAG_ERR.items()}
+        lines, late, log_err, last_hb = [], [], "", ""
+        counts = {k: 0 for k in pats}
+        seen_at = {k: ["", ""] for k in pats}               # first / last timestamp per error type
         try:
             with open(path, encoding="utf-8", errors="replace") as fh:
                 for ln in fh:
                     ln = ln.rstrip("\n")
-                    for k in self._DIAG_ERR:
-                        if k in ln:
+                    ts = ln[:19] if re.match(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d", ln) else "?"
+                    for k, rx in pats.items():
+                        if rx.search(ln):
                             counts[k] += 1
+                            seen_at[k][0] = seen_at[k][0] or ts
+                            seen_at[k][1] = ts
                     if any(k in ln for k in self._DIAG_LATE):
                         late.append(ln)
+                    if " bot: hb " in ln:                    # heartbeat: keep only the latest, shown in full
+                        last_hb = ln
+                        continue
                     lines.append(ln)
                     if len(lines) > 400:
                         del lines[:200]
@@ -199,21 +219,27 @@ class RemoteLink:
             out.append(f"5) LATE: {na}{log_err}")
         else:
             out.append(f"4) ERRORS ({path}): " + " ".join(f"{k}={v}" for k, v in counts.items()))
+            out.extend(f"   {k}: first {seen_at[k][0]} | last {seen_at[k][1]}" for k in counts if counts[k])
             out.append("5) LATE: " + (f"{len(late)} total" if late else "0"))
             out.extend("   " + redact(x)[:200] for x in late[-10:])
 
         # 6) QUOTA
         cr = (st or {}).get("credits")
+        now_utc = datetime.now(timezone.utc)
+        midnight = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        reset = max(self.boot, midnight)                     # counter = RAM: zeroed at process start + UTC midnight
         out.append(f"6) QUOTA: {(cr or {}).get('used', 'غير متاح')}/{(cr or {}).get('cap', '-')} "
-                   f"(UTC day; RAM only - resets on every restart; process up {(time.time() - self.boot) / 60:.0f} min)")
+                   f"RAM only | reset_at={datetime.fromtimestamp(reset, timezone.utc):%Y-%m-%d %H:%M:%S}Z "
+                   f"({'process start' if reset == self.boot else 'UTC midnight'}, {(time.time() - reset) / 60:.0f} min ago)")
 
         # 7) TAIL - drop the OLDEST lines first until the message fits
         head = "\n".join(out)
         if log_err:
             return self._fit(head + f"\n7) TAIL: {na}{log_err}")
         tail = [redact(x)[:240] for x in lines[-40:]]
+        hb = "\n8) LAST HB (full):\n" + (redact(last_hb) if last_hb else "غير متاح: no heartbeat line in the log")
         while True:
-            msg = head + f"\n7) TAIL (last {len(tail)}):\n" + "\n".join(tail)
+            msg = head + f"\n7) TAIL (last {len(tail)}, heartbeats excluded):\n" + "\n".join(tail) + hb
             if (len(msg) <= self.DIAG_MAX_CHARS and len(msg.encode("utf-8")) <= self.DIAG_MAX_BYTES) or not tail:
                 return self._fit(msg)
             tail.pop(0)
