@@ -29,17 +29,19 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dc_replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Dict, Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+import fx_hours
 import market_calendar as cal
 from broker import Broker, Fill, PaperBroker
-from config import (SYMBOLS, ConfigError, Params, SymbolCfg, apply_env_overrides, get_params,
-                    load_env, validate_config)
+from config import (MODE_FILE, TRADING_MODES, ConfigError, Params, SymbolCfg, apply_env_overrides,
+                    get_params, load_env, read_trading_mode, symbols_for_mode, validate_config)
+from config import SYMBOLS as ALL_KNOWN
 from data import BarStore, redact
 from engine import Account, Position, SymbolEngine
 from guardian import GuardCfg, Guardian
@@ -88,7 +90,7 @@ class SymState:
         self.cfg, self.eng, self.bar_prov, self.quote_prov = cfg, eng, bar_prov, quote_prov
         self.itv = timedelta(minutes=cfg.interval_minutes)
         self.same_source = cfg.provider == cfg.quote_src
-        self.store = BarStore(cfg.interval_minutes)
+        self.store = BarStore(cfg.interval_minutes, keep=max(300, cfg.history_bars))
         self.filter = QuoteFilter(p.max_tick_jump_pct)
         self.quote: Optional[Quote] = None
         self.last_eval: Optional[pd.Timestamp] = None      # start of the last CLOSED bar evaluated
@@ -111,10 +113,11 @@ class Runtime:
     def __init__(self, p: Params, symbols, providers: dict, broker: Broker, store: StateStore,
                  notifier: Notifier, executor, clock: Callable[[], float] = time.time,
                  stop_file: str = STOP_FILE, flatten_file: str = FLATTEN_FILE,
-                 trades_file: str = TRADES_FILE):
+                 trades_file: str = TRADES_FILE, mode: str = "all"):
         self.p, self.broker, self.store, self.n = p, broker, store, notifier
         self.ex, self.clock = executor, clock
         self.stop_file, self.flatten_file, self.trades_file = stop_file, flatten_file, trades_file
+        self.mode = mode
         self.acct = Account(p.initial_equity, p)
         self.syms = [SymState(s, SymbolEngine(s, p, self.acct), providers[s.provider],
                               providers[s.quote_src], p) for s in symbols]
@@ -134,6 +137,26 @@ class Runtime:
         self.recent_trades: list = []
         self.guard.on_equity(self.acct.equity)
         self.last_alive = clock()
+
+    # ------------------------------------------------------------ trading mode (from the phone)
+    def request_mode(self, mode: str, mode_file: str = MODE_FILE) -> tuple:
+        """Switch breakout / scalp / both. Takes effect after a restart (the caller restarts the bot).
+        Refused while any position is open or an entry is pending, so no position can be orphaned."""
+        mode = (mode or "").strip().lower()
+        mode = {"breakout": "qqq"}.get(mode, mode)
+        if mode not in TRADING_MODES:
+            return False, "الأوضاع المتاحة: all (الكل) | fx (ذهب وعملات) | qqq | scalp (سكالبينج QQQ) | both"
+        if mode == self.mode:
+            return False, f"البوت يعمل أصلاً بوضع {mode}"
+        busy = [s.cfg.symbol for s in self.syms if s.eng.pos is not None or s.pending is not None]
+        if busy:
+            return False, f"مرفوض: توجد صفقة مفتوحة أو دخول معلّق ({', '.join(busy)}). أغلقها أولاً (/flatten) ثم أعد المحاولة."
+        tmp = mode_file + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(mode + "\n")
+        os.replace(tmp, mode_file)
+        self._save(self.clock(), force=True)
+        return True, f"تم: الوضع الجديد {mode}. البوت يعيد التشغيل خلال ثوانٍ (الرصيد والسجل محفوظان)."
 
     # ------------------------------------------------------------ persistence
     def snapshot(self) -> dict:
@@ -220,14 +243,22 @@ class Runtime:
     def _is_stock(self, ss: SymState) -> bool:
         return ss.cfg.kind == "stock"
 
+    def _is_fx(self, ss: SymState) -> bool:
+        return ss.cfg.kind == "fx"
+
+    def _fx_open(self, ss: SymState, now: float) -> bool:
+        return fx_hours.is_open(self._local(ss, now), ss.cfg.metal)
+
     def _active(self, ss: SymState, now: float) -> bool:
         """Is it worth polling this symbol right now?"""
+        if self._is_fx(ss):
+            return self._fx_open(ss, now)
         if not self._is_stock(ss):
             return True
         return cal.active_window(self._local(ss, now), 5, 30 if ss.eng.pos else 3)
 
     def _entries_allowed(self, ss: SymState, now: float) -> bool:
-        if os.path.exists(self.stop_file) or self.flatten_req:
+        if os.path.exists(self.stop_file) or self.flatten_req or ss.cfg.exit_only:
             return False
         if max(ss.errs.values()) >= self.p.max_error_streak:
             return False
@@ -243,7 +274,18 @@ class Runtime:
                 return False
             if ss.cfg.flatten_eod and local >= sess[1] - timedelta(minutes=ss.flat_min + 3):
                 return False
+        if self._is_fx(ss):
+            local = self._local(ss, now)
+            if not self._fx_open(ss, now):
+                return False
+            if ss.cfg.flatten_eod and local.strftime("%H:%M") >= self._minus3(ss.cfg.eod_time):
+                return False
         return True
+
+    @staticmethod
+    def _minus3(hhmm: str) -> str:
+        m = int(hhmm[:2]) * 60 + int(hhmm[3:]) - 3
+        return f"{m // 60:02d}:{m % 60:02d}"
 
     # ------------------------------------------------------------ scheduling (never blocks)
     def _submit(self, ss: SymState, kind: str, prov, fn, *args) -> None:
@@ -273,6 +315,13 @@ class Runtime:
                 return
         L = ss.last_eval
         due_at = None if L is None else L + 2 * ss.itv + timedelta(seconds=self.p.bar_settle_sec)
+        if L is not None and self._is_fx(ss):
+            nxt = L + ss.itv                               # skip bars that cannot exist (break / weekend)
+            for _ in range(24 * 60):
+                if fx_hours.bar_is_open(nxt.to_pydatetime(), ss.cfg.metal):
+                    break
+                nxt += ss.itv
+            due_at = nxt + ss.itv + timedelta(seconds=self.p.bar_settle_sec)
         if not (L is None or ss.needs_full or local >= due_at):
             return
         b = ss.bar_prov.budget
@@ -280,7 +329,7 @@ class Runtime:
             return
         overdue = 0.0 if due_at is None else (local - due_at).total_seconds()
         ss.next_bar_try = now + (self.p.bar_retry_sec if overdue < 60 else 5.0 if overdue < 300 else 15.0)
-        n = 300 if (ss.needs_full or ss.store.df.empty) else 6
+        n = ss.store.keep if (ss.needs_full or ss.store.df.empty) else 6
         self._submit(ss, "bar", ss.bar_prov, ss.bar_prov.bars, ss.cfg, n)
         if overdue > 3 * ss.itv.total_seconds() and L is not None:
             self.n.send(f"{ss.cfg.symbol}: no new bar for {overdue/60:.0f} min (data stalled?)",
@@ -365,6 +414,12 @@ class Runtime:
                     reason = "overnight"                       # never carry stock overnight
             elif sess is not None and local >= sess[1] - timedelta(minutes=ss.flat_min):
                 reason = "eod"
+        elif self._is_fx(ss) and ss.cfg.flatten_eod:
+            local = self._local(ss, now)
+            if pos.entry_ts.date() < local.date():
+                reason = "overnight"                           # bot was down at 16:45 -> close at once
+            elif local.strftime("%H:%M") >= ss.cfg.eod_time:
+                reason = "eod"                                 # daily flat: no overnight / weekend risk
         if reason is None:
             sig = ss.eng.check_tick(q.bid, q.ask, q.last)
             if sig:
@@ -406,6 +461,9 @@ class Runtime:
     # ------------------------------------------------------------ bars -> signals -> pending entry
     def _apply_bars(self, ss: SymState, df: pd.DataFrame, now: float) -> None:
         ss.errs["bar"] = 0
+        if self._is_fx(ss) and df is not None and not df.empty:
+            keep = [fx_hours.bar_is_open(t.to_pydatetime(), ss.cfg.metal) for t in df.index]
+            df = df[keep]                                      # drop the provider's closed-market filler bars
         res = ss.store.merge(df)
         if res == "gap":                                       # missed bars / new session -> full download
             ss.needs_full, ss.next_bar_try = True, now
@@ -523,6 +581,9 @@ class Runtime:
                 continue
             sym = ss.cfg.symbol
             if not self._active(ss, now):
+                if self._is_fx(ss):
+                    self.n.send(f"{sym}: position open while the market is closed - will close at the next price",
+                                key=f"afterclose-{sym}", every=600, level=logging.WARNING)
                 if self._is_stock(ss):
                     local = self._local(ss, now)
                     sess = cal.session(local.date())
@@ -575,10 +636,12 @@ class Runtime:
             p_ = ss.eng.pos
             q = ss.quote
             syms[ss.cfg.symbol] = {
+                "strategy": ss.cfg.strategy,
                 "position": None if p_ is None else {
                     "side": "long" if p_.side == 1 else "short", "qty": p_.qty, "entry": p_.entry,
                     "stop": p_.stop, "target": p_.target,
-                    "unrealized": None if q is None else round(p_.side * (q.mid - p_.entry) * p_.qty, 2)},
+                    "unrealized": None if q is None else round(
+                        p_.side * (q.mid - p_.entry) * p_.qty * ss.cfg.usd_per_quote(q.mid), 2)},
                 "last_price": None if q is None else q.mid,
                 "quote_age_s": None if q is None else round(now - q.ts, 1),
                 "errors": dict(ss.errs)}
@@ -590,17 +653,32 @@ class Runtime:
             sess = cal.session(ny.date())
             is_open = bool(sess and sess[0] <= ny < sess[1])
             if is_open:
-                text = f"السوق الأمريكي مفتوح حتى {sess[1]:%H:%M} نيويورك"
+                text = f"QQQ: السوق الأمريكي مفتوح حتى {sess[1]:%H:%M} نيويورك"
             else:
                 nxt = ny.date() if (sess and ny < sess[0]) else ny.date() + timedelta(days=1)
                 while cal.session(nxt) is None:
                     nxt += timedelta(days=1)
                 o = cal.session(nxt)[0].replace(tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("Asia/Baghdad"))
                 days = ["الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد"]
-                text = f"السوق مغلق - يفتح {days[o.weekday()]} {o:%H:%M} بتوقيت بغداد"
+                text = f"QQQ: السوق الأمريكي مغلق - يفتح {days[o.weekday()]} {o:%H:%M} بتوقيت بغداد"
             market = {"open": is_open, "text": text, "ny_time": ny.strftime("%H:%M")}
+        fx_market = None
+        fxs = next((s for s in self.syms if self._is_fx(s)), None)
+        if fxs is not None:
+            ny = self._local(fxs, now)
+            if fx_hours.is_open(ny, False):
+                w = fxs.cfg.windows[0] if fxs.cfg.windows else ("00:00", "23:59")
+                bg = [datetime.combine(ny.date(), datetime.strptime(x, "%H:%M").time()).replace(
+                    tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("Asia/Baghdad")) for x in w]
+                fx_market = {"open": True,
+                             "text": f"الذهب والعملات: السوق مفتوح (الدخول {bg[0]:%H:%M}-{bg[1]:%H:%M} بغداد)"}
+            else:
+                o = fx_hours.next_open(ny, False).replace(tzinfo=ZoneInfo("America/New_York")).astimezone(
+                    ZoneInfo("Asia/Baghdad"))
+                days = ["الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد"]
+                fx_market = {"open": False, "text": f"الذهب والعملات: مغلق - يفتح {days[o.weekday()]} {o:%H:%M} بغداد"}
         return {"time_utc": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
-                "market": market,
+                "market": market, "fx_market": fx_market, "mode": self.mode,
                 "equity": round(a.equity, 2), "day_start_equity": round(a.day_start_equity, 2),
                 "trades_today": a.trades_today, "consec_losses": a.consec_losses,
                 "stop_file": os.path.exists(self.stop_file), "flatten_file": os.path.exists(self.flatten_file),
@@ -673,10 +751,11 @@ def main() -> None:
     logging.getLogger().addHandler(LOG_TAIL)
     if os.getenv("MODE", "paper").lower() != "paper":
         raise SystemExit("Only MODE=paper is implemented. Live trading is intentionally not included.")
-    symbols = SYMBOLS
-    apply_env_overrides(symbols)
     p = get_params()
     try:
+        mode = read_trading_mode()
+        symbols = symbols_for_mode(mode)
+        apply_env_overrides(symbols)
         validate_config(p, symbols)
     except ConfigError as e:
         raise SystemExit(f"CONFIG ERROR: {e}")
@@ -686,12 +765,22 @@ def main() -> None:
         raise SystemExit("Another bot instance is already running in this folder - refusing to start.")
 
     notifier = Notifier()
+    store = StateStore(STATE_FILE)
+    st = store.load()
+    # A saved open position on a strategy that is not part of the current mode (e.g. TRADING_MODE was
+    # changed by hand) is still managed until it closes - exits only, no new entries.
+    for sym, d in ((st or {}).get("symbols") or {}).items():
+        if d.get("position") and sym not in {s.symbol for s in symbols}:
+            known = {s.symbol: s for s in ALL_KNOWN}
+            if sym in known:
+                symbols = symbols + [dc_replace(known[sym], exit_only=True)]
+                apply_env_overrides(symbols[-1:])
+                notifier.send(f"{sym}: open position from the previous mode - managed in EXIT-ONLY mode until closed",
+                              level=logging.WARNING)
     providers = make_providers(p, symbols)
     executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="io")
-    store = StateStore(STATE_FILE)
-    rt = Runtime(p, symbols, providers, PaperBroker(), store, notifier, executor)
+    rt = Runtime(p, symbols, providers, PaperBroker(), store, notifier, executor, mode=mode)
 
-    st = store.load()
     for note in store.notes:
         notifier.send(f"STATE WARNING: {note}", level=logging.ERROR)
     if st is not None:
@@ -700,14 +789,21 @@ def main() -> None:
         except Exception as e:
             notifier.send(f"STATE WARNING: could not apply saved state ({type(e).__name__}: {e}) - "
                           f"starting fresh; CHECK for open positions manually", level=logging.ERROR)
-            rt = Runtime(p, symbols, providers, PaperBroker(), store, notifier, executor)
+            rt = Runtime(p, symbols, providers, PaperBroker(), store, notifier, executor, mode=mode)
     if any(s.kind == "stock" for s in symbols) and not cal.covers(datetime.now(timezone.utc).date()):
         notifier.send("WARNING: NYSE calendar in market_calendar.py does not cover today - "
                       "holidays/early closes are NOT known. Update it.", level=logging.WARNING)
 
     from telegram_ctl import TelegramControl
+    def _mode(m: str) -> str:
+        ok, msg = rt.request_mode(m)
+        if ok:
+            notifier.send(f"trading mode -> {m} (restarting)", level=logging.WARNING)
+            threading.Timer(2.0, rt.stopping.set).start()
+        return msg
+
     ctl = TelegramControl(lambda: rt.status(time.time()),
-                          {"stop": STOP_FILE, "flatten": FLATTEN_FILE, "halt": "HALT"})
+                          {"stop": STOP_FILE, "flatten": FLATTEN_FILE, "halt": "HALT"}, mode_fn=_mode)
     ctl.start()
     if os.getenv("PORT"):                                     # web dashboard (Render / any host with a port)
         from dashboard import Dashboard
@@ -728,7 +824,7 @@ def main() -> None:
         if sig is not None:
             signal.signal(sig, _bye)
 
-    notifier.send(f"Bot started (PAPER). symbols={[s.symbol for s in symbols]} equity={rt.acct.equity:.2f} "
+    notifier.send(f"Bot started (PAPER). mode={mode} symbols={[s.symbol for s in symbols]} equity={rt.acct.equity:.2f} "
                   f"providers={{{', '.join(f'{s.symbol}: bars={s.provider} quotes={s.quote_src}' for s in symbols)}}}")
     try:
         rt.run()

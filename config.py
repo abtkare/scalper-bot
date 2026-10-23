@@ -71,8 +71,8 @@ class Params:
 
 @dataclass
 class SymbolCfg:
-    symbol: str                      # Twelve Data symbol, e.g. "QQQ", "BTC/USD"
-    kind: str                        # "stock" or "crypto"
+    symbol: str                      # bot id = Twelve Data symbol unless provider_symbol is set ("QQQ", "XAU/USD")
+    kind: str                        # "stock" | "crypto" | "fx" (spot gold/silver + currency pairs)
     tz: str                          # timezone of the bar timestamps
     interval: str = "5min"
     interval_minutes: int = 5
@@ -85,8 +85,12 @@ class SymbolCfg:
     quote_provider: str = ""         # optional different source for live prices ("" = same as provider)
     provider_symbol: str = ""        # override symbol name at the provider (binance: BTCUSDT)
     poll_sec: float = 0.0            # per-symbol live-price poll interval (0 = Params.quote_poll_sec)
-    strategy: str = "pullback"       # "pullback" (EMA20/50 pullback, original) | "breakout" (Donchian + trend)
+    strategy: str = "pullback"       # pullback | breakout (Donchian+trend) | scalp (VWAP reversion) | rsi2 (RSI(2) reversion)
     donchian_n: int = 24             # breakout: close above the highest high of the previous N bars
+    vwap_k: float = 1.0              # scalp: enter when close is more than k*ATR away from the session VWAP
+    history_bars: int = 300          # bars kept/downloaded for indicators (scalp needs ~600 for EMA200)
+    rsi2_th: float = 10.0            # rsi2: long when RSI(2) < th (above EMA200), short when RSI(2) > 100-th (below)
+    exit_only: bool = False          # set automatically for a leftover position of a mode that is switched off
     stop_atr: float = 0.0            # per-symbol overrides (0 = use Params.stop_atr / target_atr)
     target_atr: float = 0.0
 
@@ -98,6 +102,21 @@ class SymbolCfg:
     def quote_src(self) -> str:
         return self.quote_provider or self.provider
 
+    @property
+    def metal(self) -> bool:
+        return self.kind == "fx" and self.ticker.split("/")[0] in ("XAU", "XAG", "XPT", "XPD")
+
+    def usd_per_quote(self, price: float) -> float:
+        """P&L of FX/metals is in the QUOTE currency. XXX/USD -> 1;  USD/JPY -> 1/price (JPY -> USD)."""
+        if self.kind == "fx" and self.ticker.startswith("USD/") and price > 0:
+            return 1.0 / price
+        return 1.0
+
+    @property
+    def ticker(self) -> str:
+        """Real market symbol (the `symbol` field is the bot's unique id, e.g. "QQQ-SCALP")."""
+        return self.provider_symbol or self.symbol
+
 
 # v3 research (1 year of real data, see RESEARCH.md):
 #   * the original 5-min pullback LOST money on every market after costs (QQQ -15%, BTC -39%/yr)
@@ -105,19 +124,96 @@ class SymbolCfg:
 #     random-entry placebo is a 15-min breakout on QQQ (long only). It FAILED on SPY/IWM/DIA and breaks
 #     even at 2 bps cost -> treat it as an EXPERIMENT to be forward-tested in paper mode, not as a proven edge.
 #   * BTC/ETH/SOL: no configuration profitable at realistic crypto costs -> not traded (kept below, commented).
-SYMBOLS: List[SymbolCfg] = [
-    SymbolCfg(
-        symbol="QQQ", kind="stock", tz="America/New_York",
-        interval="15min", interval_minutes=15, strategy="breakout", donchian_n=24,
-        stop_atr=0.75, target_atr=2.0,
-        cost_bps=1.0, flatten_eod=True, eod_time="15:45",
-        windows=[("09:45", "15:30")],
-    ),
-    # Original v2 setting - lost 39% in the 1-year backtest. Enable only to study it in paper mode.
-    # SymbolCfg(symbol="BTC/USD", kind="crypto", tz="UTC", cost_bps=6.0),
-    # SymbolCfg(symbol="SPY", kind="stock", tz="America/New_York", cost_bps=1.0,
-    #           flatten_eod=True, windows=[("09:35", "11:00"), ("15:00", "15:50")]),
-]
+BREAKOUT_QQQ = SymbolCfg(
+    symbol="QQQ", kind="stock", tz="America/New_York",
+    interval="15min", interval_minutes=15, strategy="breakout", donchian_n=24,
+    stop_atr=0.75, target_atr=2.0,
+    cost_bps=1.0, flatten_eod=True, eod_time="15:45",
+    windows=[("09:45", "15:30")],
+)
+
+# v4 scalping mode (RESEARCH.md sections 7-8): 15-min VWAP mean reversion on QQQ, long AND short.
+#   Long : close > EMA200 and close < session VWAP - 1.0*ATR  -> buy next bar open
+#   Short: close < EMA200 and close > session VWAP + 1.0*ATR  -> sell next bar open
+#   Small target (0.75 ATR) + wide stop (2 ATR) -> high win rate, small edge per trade.
+#   backtest.py --mode scalp, 1 year QQQ: 193 trades, win rate 75.1%, +0.061R/trade, PF 1.35, max DD -3.0%
+#   (in-sample 75.0% / +0.041R, out-of-sample 75.3% / +0.091R).
+#   It LOST on SPY / IWM / DIA with the same rules -> EXPERIMENT, paper only.
+# Its id is "QQQ-SCALP" (provider_symbol="QQQ") so it can run side by side with the breakout on QQQ.
+SCALP_QQQ = SymbolCfg(
+    symbol="QQQ-SCALP", provider_symbol="QQQ", kind="stock", tz="America/New_York",
+    interval="15min", interval_minutes=15, strategy="scalp", vwap_k=1.0, history_bars=600,
+    stop_atr=2.0, target_atr=0.75, allow_short=True,
+    cost_bps=1.0, flatten_eod=True, eod_time="15:45",
+    windows=[("09:45", "15:30")],
+)
+
+# v5 (RESEARCH.md section 9): gold + major FX, 1-hour RSI(2) mean reversion in the New York morning.
+#   Long : close > EMA200 and RSI(2) < 10   |   Short: close < EMA200 and RSI(2) > 90
+#   Entries only on bars opening 08:00-12:00 New York (15:00-19:00 Baghdad), stop 1 ATR, target 1.5 ATR,
+#   everything closed at 16:45 New York (never held overnight / over the weekend).
+#   7 months of real 15-min data (Mar-Oct 2026), 4 instruments pooled: 169 trades, win rate 52.7%,
+#   +0.18R/trade, PF 1.42, max DD -6.5%; random-entry placebo -0.095R. Only 7 months -> EXPERIMENT (paper).
+#   cost_bps = assumed per-side cost of an ECN / cTrader account (spread + commission). Replace with yours.
+def _fx(sym: str, cost: float) -> SymbolCfg:
+    return SymbolCfg(
+        symbol=sym, kind="fx", tz="America/New_York", interval="1h", interval_minutes=60,
+        strategy="rsi2", rsi2_th=10.0, history_bars=600, stop_atr=1.0, target_atr=1.5, allow_short=True,
+        cost_bps=cost, flatten_eod=True, eod_time="16:45", windows=[("08:00", "12:00")], poll_sec=30.0,
+    )
+
+
+GOLD = _fx("XAU/USD", 0.5)
+EURUSD = _fx("EUR/USD", 0.5)
+GBPUSD = _fx("GBP/USD", 0.6)
+USDJPY = _fx("USD/JPY", 0.5)
+FX_SET = [GOLD, EURUSD, GBPUSD, USDJPY]
+
+# all   : QQQ breakout + gold + 3 FX pairs (default)
+# fx    : gold + 3 FX pairs only
+# qqq   : QQQ breakout only ("breakout" is the old name of this mode)
+# scalp : QQQ VWAP scalping only (v4 experiment)    both : QQQ breakout + QQQ scalping
+TRADING_MODES = ("all", "fx", "qqq", "scalp", "both")
+_MODE_ALIASES = {"breakout": "qqq"}
+MODE_FILE = "trading_mode.txt"      # written by /mode (Telegram / dashboard); wins over TRADING_MODE env
+
+
+def read_trading_mode(path: str = MODE_FILE) -> str:
+    """all (default) | fx | qqq | scalp | both.  File (set from the dashboard) > env TRADING_MODE > default."""
+    m = ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            m = f.read().strip().lower()
+    except OSError:
+        pass
+    m = _MODE_ALIASES.get(m, m)
+    if m not in TRADING_MODES:
+        m = os.getenv("TRADING_MODE", "all").strip().lower()
+        m = _MODE_ALIASES.get(m, m)
+    if m not in TRADING_MODES:
+        raise ConfigError(f"TRADING_MODE must be one of {TRADING_MODES}, got {m!r}")
+    return m
+
+
+def symbols_for_mode(mode: str) -> List[SymbolCfg]:
+    mode = _MODE_ALIASES.get(mode, mode)
+    if mode == "all":
+        return [BREAKOUT_QQQ] + FX_SET
+    if mode == "fx":
+        return list(FX_SET)
+    if mode == "qqq":
+        return [BREAKOUT_QQQ]
+    if mode == "scalp":
+        return [SCALP_QQQ]
+    if mode == "both":
+        return [BREAKOUT_QQQ, SCALP_QQQ]
+    raise ConfigError(f"unknown trading mode {mode!r}")
+
+
+# Default list (used by backtest.py --all and the tests). The live bot uses symbols_for_mode(read_trading_mode()).
+SYMBOLS: List[SymbolCfg] = [BREAKOUT_QQQ, SCALP_QQQ] + FX_SET
+# Original v2 setting - lost 39% in the 1-year backtest:
+# SymbolCfg(symbol="BTC/USD", kind="crypto", tz="UTC", cost_bps=6.0)
 
 PROVIDERS = ("twelvedata", "binance")
 
@@ -177,7 +273,7 @@ def validate_config(p: Params, symbols: List[SymbolCfg]) -> None:
     for s in symbols:
         need(s.symbol not in seen, f"duplicate symbol {s.symbol}")
         seen.add(s.symbol)
-        need(s.kind in ("stock", "crypto"), f"{s.symbol}: kind must be 'stock' or 'crypto'")
+        need(s.kind in ("stock", "crypto", "fx"), f"{s.symbol}: kind must be 'stock', 'crypto' or 'fx'")
         try:
             ZoneInfo(s.tz)
         except Exception:
@@ -187,7 +283,13 @@ def validate_config(p: Params, symbols: List[SymbolCfg]) -> None:
         need(s.provider in PROVIDERS, f"{s.symbol}: provider must be one of {PROVIDERS}")
         need(s.quote_src in PROVIDERS, f"{s.symbol}: quote_provider must be one of {PROVIDERS}")
         need(s.poll_sec >= 0, f"{s.symbol}: poll_sec must be >= 0")
-        need(s.strategy in ("pullback", "breakout"), f"{s.symbol}: strategy must be 'pullback' or 'breakout'")
+        need(s.strategy in ("pullback", "breakout", "scalp", "rsi2"),
+             f"{s.symbol}: strategy must be 'pullback', 'breakout', 'scalp' or 'rsi2'")
+        need(0 < s.rsi2_th < 50, f"{s.symbol}: rsi2_th must be in (0, 50)")
+        if s.kind == "fx":
+            need(s.tz == "America/New_York", f"{s.symbol}: fx symbols need tz='America/New_York' (trading hours)")
+        need(s.vwap_k > 0, f"{s.symbol}: vwap_k must be > 0")
+        need(150 <= s.history_bars <= 5000, f"{s.symbol}: history_bars must be in [150, 5000]")
         need(s.donchian_n >= 2, f"{s.symbol}: donchian_n must be >= 2")
         need(s.stop_atr >= 0 and s.target_atr >= 0, f"{s.symbol}: stop_atr/target_atr must be >= 0")
         need(_HHMM.match(s.eod_time) is not None, f"{s.symbol}: eod_time must be HH:MM")

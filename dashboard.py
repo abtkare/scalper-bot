@@ -2,7 +2,7 @@
 
   GET  /                 dashboard page (HTTP Basic auth: any user name + DASHBOARD_PASSWORD)
   GET  /api/status       JSON status          (Basic auth, or ?token=MONITOR_TOKEN)
-  POST /api/control      {"cmd": "stop|start|flatten|halt|resume"}   (Basic auth)
+  POST /api/control      {"cmd": "stop|start|flatten|halt|resume|restart|mode_all|mode_fx|mode_qqq|mode_scalp|mode_both"}
   GET  /api/control?cmd=flatten&token=MONITOR_TOKEN                  (for the remote monitor)
   GET  /healthz          200 while the trade loop is alive, 503 if it stalled (> 90 s) - no auth
 
@@ -23,7 +23,8 @@ from typing import Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 log = logging.getLogger("dashboard")
-COMMANDS = ("stop", "start", "flatten", "halt", "resume", "restart")
+COMMANDS = ("stop", "start", "flatten", "halt", "resume", "restart",
+            "mode_all", "mode_fx", "mode_qqq", "mode_scalp", "mode_both")
 
 
 class LogTail(logging.Handler):
@@ -117,7 +118,10 @@ class Dashboard:
                 if u.path == "/api/control":
                     if not tok:                          # GET control only with the monitor token
                         return self._deny()
-                    return self._control((q.get("cmd") or [""])[0], "monitor")
+                    c = (q.get("cmd") or [""])[0]
+                    if c.strip().lower().startswith("mode_"):    # mode changes only from the owner's dashboard
+                        return self._send(403, {"error": "mode change needs the dashboard password"})
+                    return self._control(c, "monitor")
                 if u.path in ("/", "/index.html"):
                     if not basic:
                         return self._deny()
@@ -146,6 +150,8 @@ class Dashboard:
                         return self._send(400, {"error": "restart not available"})
                     threading.Timer(2.0, dash.restart_fn).start()
                     msg = "جارٍ التحديث: البوت يحفظ حالته ويعيد التشغيل بأحدث كود من GitHub خلال دقيقة."
+                elif cmd.startswith("mode_"):
+                    msg = dash.command_fn("/mode " + cmd[5:])
                 else:
                     msg = dash.command_fn("/" + cmd)
                 log.warning("control %s from %s", cmd, who)
@@ -202,6 +208,13 @@ h2{font-size:15px;margin:18px 0 8px}#msg{min-height:20px;font-size:13px}
  </div>
  <button class="bu" style="width:100%;margin-top:2px" onclick="cmd('restart','تحديث البوت بأحدث كود من GitHub؟ (الحالة والصفقات تبقى محفوظة)')">🔄 تحديث البوت من GitHub</button>
  <div id="msg" class="mut"></div></div>
+<h2>ماذا يتداول البوت؟</h2><div class="c"><div class="k">الوضع الحالي: <b id="mode">–</b> · التغيير مرفوض أثناء وجود صفقة مفتوحة، ويعيد تشغيل البوت تلقائياً</div>
+ <div class="btns">
+  <button class="bs" id="m_all" onclick="cmd('mode_all','تداول الكل: QQQ + الذهب + EURUSD + GBPUSD + USDJPY؟')">🌍 الكل</button>
+  <button class="bs" id="m_fx" onclick="cmd('mode_fx','الذهب والعملات فقط (بدون QQQ)؟')">🥇 ذهب وعملات</button>
+  <button class="bs" id="m_qqq" onclick="cmd('mode_qqq','QQQ فقط (اختراق)؟')">📈 QQQ فقط</button>
+  <button class="bs" id="m_scalp" onclick="cmd('mode_scalp','سكالبينج QQQ فقط؟ (تجريبي - نسبة ربح ~75% وربح صغير لكل صفقة)')">⚡ سكالبينج QQQ</button>
+ </div></div>
 <h2>الرموز والصفقات المفتوحة</h2><div class="c scroll"><table id="syms"></table></div>
 <h2>الحارس</h2><div class="c" id="guard">–</div>
 <h2>آخر الصفقات</h2><div class="c scroll"><table id="trades"></table></div>
@@ -228,10 +241,14 @@ async function load(){
   if(g.global_pause_min) fl.push('<span class="badge warn">تهدئة '+g.global_pause_min+' د</span>');
   if(!fl.length) fl.push('<span class="badge ok">يعمل طبيعياً</span>');
   if(s.market) fl.push('<span class="badge '+(s.market.open?'ok':'warn')+'">'+esc(s.market.text)+'</span>');
+  if(s.fx_market) fl.push('<span class="badge '+(s.fx_market.open?'ok':'warn')+'">'+esc(s.fx_market.text)+'</span>');
   $('flags').innerHTML=fl.join('');
-  let h='<tr><th>الرمز</th><th>الحالة</th><th>السعر</th><th>دخول</th><th>وقف</th><th>هدف</th><th>غير محقق</th><th>عمر السعر</th></tr>';
+  const MN={all:'الكل: QQQ + ذهب + عملات',fx:'الذهب والعملات',qqq:'QQQ فقط',scalp:'سكالبينج QQQ',both:'QQQ اختراق + سكالبينج'};
+  $('mode').textContent=MN[s.mode]||s.mode||'–';
+  for(const m of ['all','fx','qqq','scalp']){const b=$('m_'+m); if(b) b.className=(s.mode==m?'bu':'bs');}
+  let h='<tr><th>الرمز</th><th>الاستراتيجية</th><th>الحالة</th><th>السعر</th><th>دخول</th><th>وقف</th><th>هدف</th><th>غير محقق</th><th>عمر السعر</th></tr>';
   for(const [k,v] of Object.entries(s.symbols||{})){const p=v.position;
-   h+='<tr><td>'+esc(k)+'</td><td>'+(p?(p.side=='long'?'شراء ':'بيع ')+p.qty:'بلا صفقة')+'</td><td>'+f(v.last_price)+'</td><td>'+(p?f(p.entry):'–')+'</td><td>'+(p?f(p.stop):'–')+'</td><td>'+(p?f(p.target):'–')+'</td><td class="'+(p&&p.unrealized<0?'neg':'pos')+'">'+(p?f(p.unrealized):'–')+'</td><td>'+(v.quote_age_s==null?'–':v.quote_age_s+' ث')+'</td></tr>';}
+   h+='<tr><td>'+esc(k)+'</td><td>'+esc({breakout:'اختراق',scalp:'سكالبينج',pullback:'سحب',rsi2:'ارتداد RSI2'}[v.strategy]||v.strategy||'')+'</td><td>'+(p?(p.side=='long'?'شراء ':'بيع ')+p.qty:'بلا صفقة')+'</td><td>'+f(v.last_price)+'</td><td>'+(p?f(p.entry):'–')+'</td><td>'+(p?f(p.stop):'–')+'</td><td>'+(p?f(p.target):'–')+'</td><td class="'+(p&&p.unrealized<0?'neg':'pos')+'">'+(p?f(p.unrealized):'–')+'</td><td>'+(v.quote_age_s==null?'–':v.quote_age_s+' ث')+'</td></tr>';}
   $('syms').innerHTML=h;
   let gh=[]; if(g.peak) gh.push('قمة الرصيد: '+f(g.peak));
   for(const [k,v] of Object.entries(g.paused||{})) gh.push('موقوف '+esc(k)+' لمدة '+v+' د');

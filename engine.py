@@ -121,15 +121,18 @@ class SymbolEngine:
         stop_atr = self.scfg.stop_atr or p.stop_atr
         target_atr = self.scfg.target_atr or p.target_atr
         stop_dist = stop_atr * atr
-        qty = self.acct.equity * p.risk_pct / stop_dist
-        qty = min(qty, self.acct.equity * p.max_leverage / price)
+        conv = self.scfg.usd_per_quote(price)          # quote currency -> USD (USD/JPY: 1/price)
+        qty = self.acct.equity * p.risk_pct / (stop_dist * conv)
+        qty = min(qty, self.acct.equity * p.max_leverage / (price * conv))
         if self.scfg.kind == "stock":
             qty = math.floor(qty)
+        elif self.scfg.kind == "fx":
+            qty = math.floor(qty * 100) / 100          # 0.01 oz / 0.01 currency unit
         else:
             qty = math.floor(qty * 1e6) / 1e6
         if not _ok(qty):
             return None
-        return EntryPlan(side, qty, stop_dist, target_atr * atr, qty * stop_dist, ts, price)
+        return EntryPlan(side, qty, stop_dist, target_atr * atr, qty * stop_dist * conv, ts, price)
 
     def open_position(self, plan: EntryPlan, fill_price: float, opened_epoch: float = 0.0,
                       client_id: str = "") -> Position:
@@ -219,8 +222,9 @@ class SymbolEngine:
         pos = self.pos
         if not _ok(exit_price):
             raise ValueError(f"invalid exit price {exit_price}")
-        gross = pos.side * (exit_price - pos.entry) * pos.qty
-        cost = (pos.entry + exit_price) * pos.qty * self.scfg.cost_bps / 1e4
+        conv = self.scfg.usd_per_quote(exit_price)    # P&L is in the quote currency -> USD
+        gross = pos.side * (exit_price - pos.entry) * pos.qty * conv
+        cost = (pos.entry + exit_price) * pos.qty * self.scfg.cost_bps / 1e4 * conv
         pnl = gross - cost
         self.acct.equity += pnl
         self.acct.consec_losses = self.acct.consec_losses + 1 if pnl < 0 else 0

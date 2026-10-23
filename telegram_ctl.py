@@ -7,6 +7,7 @@ Only messages from TELEGRAM_CHAT_ID are obeyed - anyone else is ignored.
   /flatten  close everything now + no entries         /resume  remove STOP, FLATTEN and HALT
   /halt     same as the guardian's HALT (manual reset needed)
   /trades   last 10 closed trades
+  /mode     show the trading mode;  /mode all | fx | qqq | scalp | both  -> switch (restarts the bot)
   /help
 """
 from __future__ import annotations
@@ -28,12 +29,14 @@ HELP = ("/status  الحالة والصفقات المفتوحة\n"
         "/stop  إيقاف الدخول الجديد\n/start  إلغاء الإيقاف\n"
         "/flatten  إغلاق كل الصفقات فوراً + منع الدخول\n"
         "/resume  استئناف كامل (يحذف STOP و FLATTEN و HALT)\n"
-        "/halt  تجميد طارئ (يحتاج /resume)\n/trades  آخر الصفقات")
+        "/halt  تجميد طارئ (يحتاج /resume)\n/trades  آخر الصفقات\n"
+        "/mode  الوضع الحالي\n/mode all الكل | /mode fx ذهب وعملات | /mode qqq | /mode scalp")
 
 
 class TelegramControl:
     def __init__(self, status_fn: Callable[[], dict], files: dict, token: Optional[str] = None,
-                 chat: Optional[str] = None):
+                 chat: Optional[str] = None, mode_fn: Optional[Callable[[str], str]] = None):
+        self.mode_fn = mode_fn
         self.token = token if token is not None else os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.chat = str(chat if chat is not None else os.getenv("TELEGRAM_CHAT_ID", "")).strip()
         self.status_fn, self.files = status_fn, files
@@ -80,6 +83,18 @@ class TelegramControl:
             for k in ("stop", "flatten", "halt"):
                 self._rm(k)
             return "تم الاستئناف الكامل."
+        if cmd == "/mode":
+            parts = text.strip().split()
+            if len(parts) < 2:
+                try:
+                    cur = self.status_fn().get("mode", "?")
+                except Exception:
+                    cur = "?"
+                return (f"الوضع الحالي: {cur}\n"
+                        "للتغيير: /mode all (الكل) | /mode fx (ذهب وعملات) | /mode qqq | /mode scalp")
+            if self.mode_fn is None:
+                return "تغيير الوضع غير متاح هنا."
+            return self.mode_fn(parts[1])
         if cmd in ("/status", "/trades"):
             try:
                 st = self.status_fn()
@@ -91,7 +106,8 @@ class TelegramControl:
     @staticmethod
     def _fmt_status(st: dict) -> str:
         g = st.get("guardian") or {}
-        lines = [f"الرصيد: {st.get('equity')}  (بداية اليوم {st.get('day_start_equity')})",
+        lines = [f"الوضع: {st.get('mode', '?')}",
+                 f"الرصيد: {st.get('equity')}  (بداية اليوم {st.get('day_start_equity')})",
                  f"صفقات اليوم: {st.get('trades_today')}  خسائر متتالية: {st.get('consec_losses')}"]
         flags = [n for n, on in (("STOP", st.get("stop_file")), ("FLATTEN", st.get("flatten_file"))) if on]
         if g.get("halted"):
