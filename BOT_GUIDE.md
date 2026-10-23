@@ -87,7 +87,8 @@ GitHub (main)  ──عند كل تشغيل للحاوية──▶  boot.py ي�
 | `broker.py` | واجهة التنفيذ + المحاكاة |
 | `providers.py` | Twelve Data (أسهم/عملات/ذهب) و Binance (رقمية) + ميزانية الطلبات اليومية |
 | `structure.py` | قراءة هيكل السوق (قمم/قيعان، اتجاه، كسر/انعكاس) + فلتر الإطار الأكبر لأسطر الاختراق |
-| `news.py` | نافذة أخبار ترامب (أرشيف CNN، 24KB كل 5 دقائق) — تنبيه فقط، لا تؤثر على الصفقات (`NEWS_WATCH=0` للإيقاف) |
+| `news.py` | نافذة الأخبار (v10): ترامب، البيت الأبيض، الفيدرالي، المركزي الأوروبي، بنك إنجلترا، بنك اليابان، EIA، Investing.com + الأجندة الاقتصادية — مترجمة للعربية، تنبيه للمهم. لا تفتح ولا تغلق صفقات |
+| `prices.py` | شريط الأسعار الحي أعلى اللوحة: ذهب، فضة، بلاتين، نحاس، نفط WTI/برنت، مؤشر الدولار، العملات، الدينار، البيتكوين، عائد السندات |
 | `dashboard.py` | لوحة التحكم |
 | `remote.py` | قناة ntfy (حالة كل دقيقة، تنبيهات، أوامر) |
 | `backtest.py` | الاختبار التاريخي (`--mode qqq|fx|scalp|all`) |
@@ -101,7 +102,7 @@ GitHub (main)  ──عند كل تشغيل للحاوية──▶  boot.py ي�
 ### أ) عبر Claude (الطريقة المعتادة)
 1. في المحادثة الجديدة يطلب Claude صلاحية الرفع على المستودع (`abtkare/scalper-bot`) — وافق على رسالة الصلاحية إن ظهرت.
 2. Claude يعدّل الكود، يشغّل **كل الاختبارات**:
-   `python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py && python test_watchlist.py && python test_ctrader.py && python test_structure.py && python test_news.py`
+   `python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py && python test_watchlist.py && python test_ctrader.py && python test_structure.py && python test_news.py && python test_prices.py`
 3. يرفع على فرع `main`.
 4. إعادة التشغيل لتحميل الكود (أي طريقة):
    - **لوحة التحكم ← 🔄 تحديث البوت من GitHub** (الأسهل)، أو
@@ -130,6 +131,8 @@ GitHub (main)  ──عند كل تشغيل للحاوية──▶  boot.py ي�
 | `MONITOR_TOKEN` / `NTFY_TOPIC` | قناة المراقبة والأوامر (ntfy) |
 | `PORT=8088` | منفذ اللوحة |
 | `TD_CREDITS_PER_DAY=800` | الحد اليومي (المراقبة تتوقف عند 70% وتبقى الباقي للصفقات المفتوحة) |
+| `NEWS_WATCH=0` / `PRICE_BOARD=0` | إيقاف نافذة الأخبار / شريط الأسعار (مفعّلان افتراضياً) |
+| `EVENT_BRAKE` | `shadow` (افتراضي: ينبّه فقط إن حدث دخول وقت خبر عالي التأثير) · `on` (يمنع الدخول من 10 د قبل الخبر إلى 20 د بعده) · `off` |
 | `RISK_PCT=0.005`، `DAILY_LOSS_CAP=0.03`، `GUARD_*` | المخاطرة والحارس (اختيارية) |
 | **cTrader (بعد الموافقة)**: `EXECUTION=ctrader_demo`، `CTRADER_CLIENT_ID`، `CTRADER_CLIENT_SECRET`، `CTRADER_ACCESS_TOKEN`، `CTRADER_REFRESH_TOKEN`، (اختياري) `CTRADER_ACCOUNT_ID`، `CTRADER_SYMBOL_MAP` | التنفيذ على الحساب التجريبي |
 

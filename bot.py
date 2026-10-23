@@ -137,7 +137,9 @@ class Runtime:
         self.by_name = {s.cfg.symbol: s for s in self.syms}
         self.providers = providers
         self.stopping = threading.Event()
-        self.news = None                                         # news.NewsWatcher (context only, never trades)
+        self.news = None                                         # news.NewsWatcher (context; event brake only)
+        self.prices = None                                       # prices.PriceBoard (dashboard ticker only)
+        self.event_brake = os.getenv("EVENT_BRAKE", "shadow").lower()   # off | shadow | on
         self.dirty = False
         self.last_save = 0.0
         self.last_wd = self.last_hb = 0.0
@@ -305,6 +307,17 @@ class Runtime:
             return True
         return cal.active_window(self._local(ss, now), 5, 30 if ss.eng.pos else 3)
 
+    def _event_block(self, ss: SymState, now: float) -> Optional[str]:
+        """High-impact economic release (CPI, jobs, rate decision...) for this symbol's currencies, or None."""
+        if self.event_brake == "off" or self.news is None or ss.cfg.kind == "crypto":
+            return None
+        ccys = {"USD"} if ss.cfg.kind != "fx" else {c for c in ss.cfg.ticker.split("/")
+                                                     if c not in ("XAU", "XAG", "XPT", "XPD")} | {"USD"}
+        try:
+            return self.news.event_window(ccys, now)
+        except Exception:
+            return None
+
     def _entries_allowed(self, ss: SymState, now: float) -> bool:
         if os.path.exists(self.stop_file) or self.flatten_req or ss.cfg.exit_only:
             return False
@@ -317,6 +330,14 @@ class Runtime:
             self.n.send(f"{ss.cfg.symbol}: entry blocked by guardian - {block}",
                         key=f"gblock-{ss.cfg.symbol}", every=900, level=logging.WARNING)
             return False
+        ev = self._event_block(ss, now)
+        if ev:
+            if self.event_brake == "on":
+                self.n.send(f"{ss.cfg.symbol}: entry blocked - high-impact release ({ev})",
+                            key=f"evblock-{ss.cfg.symbol}", every=900, level=logging.WARNING)
+                return False
+            self.n.send(f"{ss.cfg.symbol}: EVENT_BRAKE shadow - this entry is inside a high-impact release window "
+                        f"({ev}); allowed (brake not switched on)", key=f"evshadow-{ss.cfg.symbol}", every=900)
         if self._is_stock(ss):
             local = self._local(ss, now)
             sess = cal.session(local.date())
@@ -838,8 +859,7 @@ class Runtime:
                 "equity": round(a.equity, 2), "day_start_equity": round(a.day_start_equity, 2),
                 "trades_today": a.trades_today, "consec_losses": a.consec_losses,
                 "stop_file": os.path.exists(self.stop_file), "flatten_file": os.path.exists(self.flatten_file),
-                "guardian": self.guard.status(now), "symbols": syms, "recent_trades": self.recent_trades[-10:],
-                "news": self.news.snapshot() if self.news is not None else None}
+                "guardian": self.guard.status(now), "symbols": syms, "recent_trades": self.recent_trades[-10:]}
 
     def _win_bg(self, ss: SymState, now: float) -> str:
         """Entry windows shown in Baghdad time (follows US/EU daylight-saving changes automatically)."""
@@ -1025,7 +1045,9 @@ def main() -> None:
                           level=logging.ERROR)
         Dashboard(lambda: rt.status(time.time()), ctl.handle, lambda: rt.last_alive, pw, tok,
                   tail=LOG_TAIL, port=int(os.getenv("PORT")), restart_fn=lambda: rt.stopping.set(),
-                  watch_fn=_watch).start()
+                  watch_fn=_watch,
+                  feeds={"/api/ticker": lambda: rt.prices.board() if rt.prices is not None else {"items": []},
+                         "/api/news": lambda: rt.news.snapshot() if rt.news is not None else None}).start()
 
     if os.getenv("NEWS_WATCH", "1") != "0":                  # Truth Social window - alerts only, never trades
         try:
@@ -1034,6 +1056,14 @@ def main() -> None:
             rt.news.start(rt.stopping)
         except Exception as e:                                # news must never stop the bot
             log.warning("news watcher not started: %s", e)
+    if os.getenv("PRICE_BOARD", "1") != "0":                 # live gold / oil / dollar / FX board (dashboard)
+        try:
+            from prices import PriceBoard
+            rt.prices = PriceBoard(lambda: {s.cfg.ticker: (s.quote.mid, s.quote.ts) for s in rt.syms
+                                            if s.quote is not None})
+            rt.prices.start(rt.stopping)
+        except Exception as e:
+            log.warning("price board not started: %s", e)
 
     from remote import RemoteLink
     RemoteLink(os.getenv("NTFY_TOPIC", ""), os.getenv("MONITOR_TOKEN", ""), lambda: rt.status(time.time()),

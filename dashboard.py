@@ -47,8 +47,10 @@ class Dashboard:
     def __init__(self, status_fn: Callable[[], dict], command_fn: Callable[[str], str],
                  alive_fn: Callable[[], float], password: str, token: str, tail: Optional[LogTail] = None,
                  port: int = 8000, restart_fn: Optional[Callable[[], None]] = None,
-                 watch_fn: Optional[Callable[[str, dict], str]] = None):
+                 watch_fn: Optional[Callable[[str, dict], str]] = None,
+                 feeds: Optional[dict] = None):
         self.watch_fn = watch_fn
+        self.feeds = feeds or {}                     # extra read-only JSON endpoints (ticker, news)
         self.status_fn, self.command_fn, self.alive_fn = status_fn, command_fn, alive_fn
         self.password, self.token, self.tail, self.port = password, token, tail, port
         self.started = time.time()
@@ -118,6 +120,13 @@ class Dashboard:
                     if not (basic or tok):
                         return self._deny()
                     return self._send(200, dash.status())
+                if u.path in dash.feeds:
+                    if not (basic or tok):
+                        return self._deny()
+                    try:
+                        return self._send(200, dash.feeds[u.path]())
+                    except Exception as e:
+                        return self._send(500, {"error": type(e).__name__})
                 if u.path == "/api/control":
                     if not tok:                          # GET control only with the monitor token
                         return self._deny()
@@ -201,7 +210,16 @@ td,th{padding:7px 4px;border-bottom:1px solid var(--line);text-align:right;white
 .scroll{overflow-x:auto}
 pre{white-space:pre-wrap;word-break:break-word;font-size:11.5px;max-height:320px;overflow:auto;margin:0;color:var(--mut)}
 h2{font-size:15px;margin:18px 0 8px}#msg{min-height:20px;font-size:13px}
-</style></head><body><div class="w">
+.tk{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);display:flex;gap:8px;overflow-x:auto;padding:8px 10px;scrollbar-width:none}
+.tk::-webkit-scrollbar{display:none}
+.tc{flex:0 0 auto;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:5px 9px;min-width:104px;transition:background .6s}
+.tc .n{font-size:11px;color:var(--mut);white-space:nowrap}.tc .p{font-weight:700;font-variant-numeric:tabular-nums;font-size:15px}
+.tc .d{font-size:11px;font-variant-numeric:tabular-nums}.fu{background:rgba(47,191,113,.28)!important}.fd{background:rgba(239,78,78,.28)!important}
+.chip{display:inline-block;padding:5px 11px;border-radius:999px;border:1px solid var(--line);font-size:12px;margin:3px 0 3px 4px;cursor:pointer}
+.chip.on{background:var(--b);color:#fff;border-color:var(--b)}
+.ni{border-top:1px solid var(--line);margin-top:8px;padding-top:8px}.ni .en{font-size:12px;color:var(--mut);direction:ltr;text-align:left}
+.ni .ar{font-size:14px;margin-top:3px}.imp2{border-right:3px solid var(--r);padding-right:7px}.imp1{border-right:3px solid var(--y);padding-right:7px}
+</style></head><body><div class="tk" id="tk"><div class="mut">⏳ تحميل الأسعار…</div></div><div class="w">
 <h1>بوت التداول — Paper</h1>
 <div class="mut" id="sub">جارٍ التحميل…</div>
 <div id="flags" style="margin-top:8px"></div>
@@ -223,6 +241,10 @@ h2{font-size:15px;margin:18px 0 8px}#msg{min-height:20px;font-size:13px}
 <h2>قائمة المراقبة وخطط الدخول</h2>
 <div class="mut" id="wlsub">يتداول البوت آلياً فقط ما نجح في اختبار تاريخه (✅). الباقي مراقبة مع خطة جاهزة.</div>
 <div id="wl"></div>
+<h2>📅 الأجندة الاقتصادية (أحداث هذا الأسبوع المؤثرة)</h2>
+<div id="cal"></div>
+<h2>📰 نافذة الأخبار — مصادر القرار المالي</h2>
+<div id="nchips"></div>
 <div id="news"></div>
 <div class="c" style="margin-top:10px"><div class="k" style="margin-bottom:6px">➕ إضافة رمز (مؤشر، زوج عملات، معدن، عملة رقمية)</div>
  <input id="nsym" placeholder="مثال: XAU/USD أو EUR/USD أو SPY أو BTC/USD" dir="ltr" style="width:100%;font:inherit;padding:11px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--tx)">
@@ -301,13 +323,31 @@ function qTxt(q){ if(!q||q.n==null) return ''; let t='اختبار تاريخه:
  return '<div class="mut" style="font-size:12px">'+esc(t)+(q.status!='ok'&&q.reason?' — '+esc(q.reason):'')+'</div>';}
 function stxt(x){ if(!x) return ''; const H={1:'صاعد',"-1":'هابط',0:'متذبذب'};
  return '<div style="font-size:12px;margin-top:2px">🧭 '+esc(x.text)+(x.htf!=null?' · الإطار الأكبر: '+H[x.htf]:'')+(x.swing_hi!=null?'<span class="mut" dir="ltr"> · قمة '+dp(x.swing_hi)+' / قاع '+dp(x.swing_lo)+'</span>':'')+'</div>';}
-function renderNews(n){ if(!n){$('news').innerHTML='';return;} const h=n.health||{};
- let x='<div class="c" style="margin-top:12px"><b>📰 نافذة الأخبار (ترامب — Truth Social)</b><div class="mut" style="font-size:12px">'
-  +(h.ok===false?'⚠ المصدر لا يستجيب: '+esc(h.error||''):h.ok?'✅ المصدر يعمل · جديد اليوم: '+(h.new_today||0):'⏳ أول فحص…')
-  +' · للمعلومة فقط — لا تؤثر على الصفقات</div>';
- for(const i of (n.items||[]).slice(0,12)){ x+='<div style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px;font-size:13px"><span class="mut" dir="ltr">'+esc(String(i.ts).slice(5,16).replace('T',' '))+' UTC</span> · <b>'+esc(i.label)+'</b><div>'+esc(i.text.slice(0,260))+'</div></div>';}
- $('news').innerHTML=x+'</div>';}
-function renderWL(s){ renderNews(s.news); const by={}; for(const [id,v] of Object.entries(s.symbols||{})){(by[v.ticker||id]=by[v.ticker||id]||[]).push([id,v]);}
+const TKP={}; let NF='all', NEWS=null;
+function age(s){return s<120?'لحظي':s<3600?'متأخر '+Math.round(s/60)+' د':'السوق مغلق';}
+async function loadTicker(){ try{ const r=await fetch('api/ticker',{cache:'no-store'}); if(!r.ok) return; const t=await r.json();
+ let h=''; for(const i of (t.items||[])){ const old=TKP[i.key]; const fl=old==null||old===i.price?'':(i.price>old?'fu':'fd'); TKP[i.key]=i.price;
+  const c=i.chg_pct==null?'':'<div class="d '+(i.chg_pct>=0?'pos':'neg')+'" dir="ltr">'+(i.chg_pct>=0?'▲ +':'▼ ')+i.chg_pct.toFixed(2)+'%</div>';
+  h+='<div class="tc '+fl+'" id="tc-'+i.key+'"><div class="n">'+esc(i.name)+'</div><div class="p" dir="ltr">'+Number(i.price).toLocaleString('en-US',{minimumFractionDigits:i.dec,maximumFractionDigits:i.dec})+'</div>'+c+'<div class="n">'+(i.src=='live'?'🟢 ':'🟡 ')+age(i.age_s)+'</div></div>';}
+ $('tk').innerHTML=h||'<div class="mut">لا أسعار بعد</div>';
+ setTimeout(()=>document.querySelectorAll('.tc.fu,.tc.fd').forEach(e=>e.classList.remove('fu','fd')),700);}catch(e){} }
+function bgT(ts){ try{return new Date(ts).toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad',weekday:'short',hour:'2-digit',minute:'2-digit',hour12:false});}catch(e){return ts;} }
+async function loadNews(){ try{ const r=await fetch('api/news',{cache:'no-store'}); if(!r.ok) return; NEWS=await r.json(); renderNews(); }catch(e){} }
+function setNF(g){NF=g;renderNews();}
+function renderNews(){ const n=NEWS; if(!n){$('news').innerHTML='<div class="c mut">النافذة متوقفة (NEWS_WATCH=0)</div>';return;}
+ const g=n.groups||{}; let ch='<span class="chip '+(NF=='all'?'on':'')+'" onclick="setNF(\'all\')">الكل</span><span class="chip '+(NF=='imp'?'on':'')+'" onclick="setNF(\'imp\')">🔴 المهم فقط</span>';
+ for(const [k,v] of Object.entries(g)) ch+='<span class="chip '+(NF==k?'on':'')+'" onclick="setNF(\''+k+'\')">'+esc(v)+'</span>';
+ $('nchips').innerHTML=ch; const h=n.health||{};
+ let x='<div class="c"><div class="mut" style="font-size:12px">'+(h.ok===false?'⚠ مصادر لا تستجيب: '+esc(Object.keys(h.bad||{}).join('، ')):h.ok?'✅ '+h.sources+' مصدر تعمل · جديد اليوم: '+(h.new_today||0):'⏳ أول فحص…')+' · للمعلومة — لا تفتح ولا تغلق صفقات</div>';
+ const its=(n.items||[]).filter(i=>NF=='all'||(NF=='imp'?i.imp>=2:i.group==NF)).slice(0,40);
+ for(const i of its){ x+='<div class="ni '+(i.imp>=2?'imp2':i.imp==1?'imp1':'')+'"><div class="mut" style="font-size:12px"><b>'+esc(i.src_ar)+'</b> · '+esc(bgT(i.ts))+(i.cat&&i.cat!='other'?' · '+esc(i.label):'')+(i.url?' · <a href="'+esc(i.url)+'" target="_blank" rel="noopener">المصدر ↗</a>':'')+'</div>'
+  +'<div class="ar">'+(i.ar?esc(i.ar):'<span class="mut">… جارٍ الترجمة</span>')+'</div><div class="en">'+esc(i.text.slice(0,400))+'</div></div>';}
+ $('news').innerHTML=x+(its.length?'':'<div class="mut">لا أخبار في هذا التصنيف</div>')+'</div>';
+ const cal=n.calendar||[]; let c='<div class="c">';
+ for(const e of cal){ c+='<div class="ni '+(e.impact=='High'?'imp2':'imp1')+'" style="'+(e.past?'opacity:.55':'')+'"><div style="display:flex;justify-content:space-between;gap:6px"><b>'+esc(e.ar||e.title)+'</b><span class="badge '+(e.impact=='High'?'bad':'warn')+'">'+esc(e.ccy)+' · '+(e.impact=='High'?'تأثير عالٍ':'متوسط')+'</span></div>'
+  +'<div class="mut" style="font-size:12px">'+esc(bgT(e.ts))+' بغداد · المتوقع '+esc(e.forecast||'–')+' · السابق '+esc(e.previous||'–')+(e.actual?' · <b>الفعلي '+esc(e.actual)+'</b>':'')+'</div>'+(e.ar?'<div class="en">'+esc(e.title)+'</div>':'')+'</div>';}
+ $('cal').innerHTML=c+(cal.length?'':'<div class="mut">لا أحداث مؤثرة قريبة</div>')+'</div>';}
+function renderWL(s){ const by={}; for(const [id,v] of Object.entries(s.symbols||{})){(by[v.ticker||id]=by[v.ticker||id]||[]).push([id,v]);}
  const near=a=>Math.min(...a.map(([i,v])=>{const p=v.plan||{};return Math.min(p.long?Math.abs(p.long.dist_pct):99,p.short?Math.abs(p.short.dist_pct):99);}));
  const keys=Object.keys(by).sort((a,b)=>near(by[a])-near(by[b]));
  let h='';
@@ -329,5 +369,5 @@ async function wl(action,body,q){ if(q&&!confirm(q)) return; body.action=action;
 function addSym(){ const sym=$('nsym').value.trim().toUpperCase(); if(!sym){alert('اكتب الرمز');return;}
  const st=['scalp','rsi2','breakout'].filter(x=>$('st_'+x).checked); if(!st.length){alert('اختر استراتيجية واحدة على الأقل');return;}
  wl('add',{symbol:sym,'class':$('ncls').value,strategies:st},'إضافة '+sym+'؟ (يعيد البوت التشغيل)'); }
-load(); setInterval(load,5000);
+load(); setInterval(load,5000); loadTicker(); setInterval(loadTicker,3000); loadNews(); setInterval(loadNews,60000);
 </script></body></html>"""
