@@ -716,7 +716,7 @@ def main() -> None:
             notifier.send("DASHBOARD_PASSWORD is not set - the dashboard pages are locked (only /healthz works)",
                           level=logging.ERROR)
         Dashboard(lambda: rt.status(time.time()), ctl.handle, lambda: rt.last_alive, pw, tok,
-                  tail=LOG_TAIL, port=int(os.getenv("PORT"))).start()
+                  tail=LOG_TAIL, port=int(os.getenv("PORT")), restart_fn=lambda: rt.stopping.set()).start()
 
     from remote import RemoteLink
     RemoteLink(os.getenv("NTFY_TOPIC", ""), os.getenv("MONITOR_TOKEN", ""), lambda: rt.status(time.time()),

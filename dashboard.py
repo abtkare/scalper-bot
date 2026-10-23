@@ -23,7 +23,7 @@ from typing import Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 log = logging.getLogger("dashboard")
-COMMANDS = ("stop", "start", "flatten", "halt", "resume")
+COMMANDS = ("stop", "start", "flatten", "halt", "resume", "restart")
 
 
 class LogTail(logging.Handler):
@@ -44,10 +44,11 @@ class LogTail(logging.Handler):
 class Dashboard:
     def __init__(self, status_fn: Callable[[], dict], command_fn: Callable[[str], str],
                  alive_fn: Callable[[], float], password: str, token: str, tail: Optional[LogTail] = None,
-                 port: int = 8000):
+                 port: int = 8000, restart_fn: Optional[Callable[[], None]] = None):
         self.status_fn, self.command_fn, self.alive_fn = status_fn, command_fn, alive_fn
         self.password, self.token, self.tail, self.port = password, token, tail, port
         self.started = time.time()
+        self.restart_fn = restart_fn
 
     # ------------------------------------------------------------ auth
     def _basic_ok(self, header: Optional[str]) -> bool:
@@ -140,7 +141,13 @@ class Dashboard:
                 cmd = (cmd or "").strip().lower()
                 if cmd not in COMMANDS:
                     return self._send(400, {"error": f"cmd must be one of {COMMANDS}"})
-                msg = dash.command_fn("/" + cmd)
+                if cmd == "restart":
+                    if dash.restart_fn is None:
+                        return self._send(400, {"error": "restart not available"})
+                    threading.Timer(2.0, dash.restart_fn).start()
+                    msg = "جارٍ التحديث: البوت يحفظ حالته ويعيد التشغيل بأحدث كود من GitHub خلال دقيقة."
+                else:
+                    msg = dash.command_fn("/" + cmd)
                 log.warning("control %s from %s", cmd, who)
                 return self._send(200, {"ok": True, "cmd": cmd, "message": msg})
 
@@ -170,7 +177,7 @@ h1{font-size:19px;margin:4px 0 2px}.mut{color:var(--mut);font-size:13px}
 .btns{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:12px 0}
 @media(min-width:640px){.btns{grid-template-columns:repeat(4,1fr)}}
 button{font:inherit;font-weight:600;border:0;border-radius:10px;padding:13px 8px;color:#fff;cursor:pointer}
-.bs{background:#5b6475}.bf{background:var(--r)}.bh{background:#9b3df0}.br{background:var(--g)}
+.bs{background:#5b6475}.bu{background:var(--b)}.bf{background:var(--r)}.bh{background:#9b3df0}.br{background:var(--g)}
 table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
 td,th{padding:7px 4px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}th{color:var(--mut);font-weight:500}
 .scroll{overflow-x:auto}
@@ -192,7 +199,9 @@ h2{font-size:15px;margin:18px 0 8px}#msg{min-height:20px;font-size:13px}
   <button class="bf" onclick="cmd('flatten','إغلاق كل الصفقات الآن؟')">⛔ إغلاق الكل</button>
   <button class="bh" onclick="cmd('halt','تجميد كامل؟')">🧊 تجميد</button>
   <button class="br" onclick="cmd('resume','استئناف التداول؟')">▶ استئناف</button>
- </div><div id="msg" class="mut"></div></div>
+ </div>
+ <button class="bu" style="width:100%;margin-top:2px" onclick="cmd('restart','تحديث البوت بأحدث كود من GitHub؟ (الحالة والصفقات تبقى محفوظة)')">🔄 تحديث البوت من GitHub</button>
+ <div id="msg" class="mut"></div></div>
 <h2>الرموز والصفقات المفتوحة</h2><div class="c scroll"><table id="syms"></table></div>
 <h2>الحارس</h2><div class="c" id="guard">–</div>
 <h2>آخر الصفقات</h2><div class="c scroll"><table id="trades"></table></div>
