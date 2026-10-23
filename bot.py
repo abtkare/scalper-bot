@@ -39,15 +39,17 @@ import pandas as pd
 import fx_hours
 import market_calendar as cal
 from broker import Broker, Fill, PaperBroker
-from config import (MODE_FILE, TRADING_MODES, ConfigError, Params, SymbolCfg, apply_env_overrides,
-                    get_params, load_env, read_trading_mode, symbols_for_mode, validate_config)
+import watchlist as wl
+from config import (ConfigError, Params, SymbolCfg, apply_env_overrides, get_params, load_env,
+                    validate_config)
 from config import SYMBOLS as ALL_KNOWN
 from data import BarStore, redact
 from engine import Account, Position, SymbolEngine
 from guardian import GuardCfg, Guardian
 from infra import Notifier, SingleInstance, StateStore, sd_notify, setup_logging
 from providers import ProviderError, Quote, QuoteFilter, make_providers
-from strategy import add_indicators, signals
+import qualify
+from strategy import add_indicators, plan_levels, signals
 
 STATE_FILE = "state.json"
 TRADES_FILE = "trades_live.csv"
@@ -105,6 +107,12 @@ class SymState:
         self.lat: Dict[str, Optional[float]] = {"quote": None, "bar": None}
         self.poll = cfg.poll_sec or p.quote_poll_sec
         self.atr: Optional[float] = None                   # latest ATR (for the guardian's shock check)
+        self.qual: Optional[dict] = None                   # qualification result (qualify.py)
+        self.qual_future = None
+        self.qual_started = 0.0
+        self.next_qual_try = 0.0
+        self.plan: Optional[dict] = None                   # pre-computed entry/stop/target levels
+        self.disabled = False                              # switched off by the user (dashboard)
         self.flat_min = 16 * 60 - (int(cfg.eod_time[:2]) * 60 + int(cfg.eod_time[3:]))   # 5 for "15:55"
 
 
@@ -113,11 +121,14 @@ class Runtime:
     def __init__(self, p: Params, symbols, providers: dict, broker: Broker, store: StateStore,
                  notifier: Notifier, executor, clock: Callable[[], float] = time.time,
                  stop_file: str = STOP_FILE, flatten_file: str = FLATTEN_FILE,
-                 trades_file: str = TRADES_FILE, mode: str = "all"):
+                 trades_file: str = TRADES_FILE, mode: str = "watchlist", gate: bool = False,
+                 classes: Optional[dict] = None):
         self.p, self.broker, self.store, self.n = p, broker, store, notifier
         self.ex, self.clock = executor, clock
         self.stop_file, self.flatten_file, self.trades_file = stop_file, flatten_file, trades_file
         self.mode = mode
+        self.gate = gate                     # True (live): a stream trades only after passing qualify.py
+        self.classes = classes or {}
         self.acct = Account(p.initial_equity, p)
         self.syms = [SymState(s, SymbolEngine(s, p, self.acct), providers[s.provider],
                               providers[s.quote_src], p) for s in symbols]
@@ -139,24 +150,46 @@ class Runtime:
         self.last_alive = clock()
 
     # ------------------------------------------------------------ trading mode (from the phone)
-    def request_mode(self, mode: str, mode_file: str = MODE_FILE) -> tuple:
-        """Switch breakout / scalp / both. Takes effect after a restart (the caller restarts the bot).
-        Refused while any position is open or an entry is pending, so no position can be orphaned."""
-        mode = (mode or "").strip().lower()
-        mode = {"breakout": "qqq"}.get(mode, mode)
-        if mode not in TRADING_MODES:
-            return False, "الأوضاع المتاحة: all (الكل) | fx (ذهب وعملات) | qqq | scalp (سكالبينج QQQ) | both"
-        if mode == self.mode:
-            return False, f"البوت يعمل أصلاً بوضع {mode}"
-        busy = [s.cfg.symbol for s in self.syms if s.eng.pos is not None or s.pending is not None]
-        if busy:
-            return False, f"مرفوض: توجد صفقة مفتوحة أو دخول معلّق ({', '.join(busy)}). أغلقها أولاً (/flatten) ثم أعد المحاولة."
-        tmp = mode_file + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(mode + "\n")
-        os.replace(tmp, mode_file)
-        self._save(self.clock(), force=True)
-        return True, f"تم: الوضع الجديد {mode}. البوت يعيد التشغيل خلال ثوانٍ (الرصيد والسجل محفوظان)."
+    def watchlist_action(self, action: str, data: dict, path: str = "") -> tuple:
+        """Dashboard edits of the watchlist. Returns (ok, message, needs_restart).
+        add/remove change which streams exist -> restart; on/off is applied live."""
+        path = path or wl.WATCHLIST_FILE
+        try:
+            items = wl.load(path)
+            action = (action or "").strip().lower()
+            if action == "add":
+                items = wl.add_symbol(items, str(data.get("symbol", "")), data.get("class") or None,
+                                      list(data.get("strategies") or ["scalp"]))
+                new = items[-1]
+                cfgs = [wl.make_cfg(new["symbol"], new["class"], st) for st in new["strategies"]]
+                validate_config(self.p, cfgs) if os.getenv("TWELVE_DATA_API_KEY") else None
+                wl.save(items, path)
+                return True, (f"تمت إضافة {new['symbol']} ({wl.CLASS_AR[new['class']]}) - "
+                              f"{'، '.join(wl.STRAT_AR[x] for x in new['strategies'])}. يعيد البوت التشغيل الآن، "
+                              f"ثم يختبر كل استراتيجية على تاريخ الرمز قبل أي تداول آلي."), True
+            if action == "remove":
+                sym = str(data.get("symbol", "")).upper().strip()
+                busy = [s.cfg.symbol for s in self.syms if s.cfg.ticker == sym and (s.eng.pos or s.pending)]
+                if busy:
+                    return False, f"مرفوض: صفقة مفتوحة على {', '.join(busy)}. أغلقها أولاً.", False
+                items = wl.remove_symbol(items, sym)
+                wl.save(items, path)
+                return True, f"تم حذف {sym} من قائمة المراقبة. يعيد البوت التشغيل الآن.", True
+            if action in ("on", "off"):
+                sid = str(data.get("id", ""))
+                items = wl.set_stream_enabled(items, sid, action == "on")
+                wl.save(items, path)
+                ss = self.by_name.get(sid)
+                if ss is not None:
+                    ss.disabled = action == "off"
+                if action == "off":
+                    return True, f"{sid}: أُوقف التداول الآلي (المراقبة والخطة مستمرتان؛ الصفقة المفتوحة تُدار حتى تُغلق).", False
+                ok_q = ss is not None and ss.qual and ss.qual.get("status") == "ok"
+                return True, (f"{sid}: التداول الآلي مفعّل." if ok_q or not self.gate else
+                              f"{sid}: مفعّل، لكنه لن يتداول إلا بعد أن ينجح في اختبار تاريخه."), False
+            return False, "إجراء غير معروف", False
+        except ConfigError as e:
+            return False, str(e), False
 
     # ------------------------------------------------------------ persistence
     def snapshot(self) -> dict:
@@ -175,6 +208,7 @@ class Runtime:
                     "last_eval": s.last_eval.isoformat() if s.last_eval is not None else None,
                     "last_signal_ts": s.last_signal_ts.isoformat() if s.last_signal_ts is not None else None,
                     "position": s.eng.pos.to_dict() if s.eng.pos else None,
+                    "qual": s.qual,
                 } for s in self.syms
             },
         }
@@ -209,6 +243,8 @@ class Runtime:
                 ss.last_signal_ts = pd.Timestamp(d["last_signal_ts"])
             if d.get("position"):
                 ss.eng.pos = Position.from_dict(d["position"])
+            if isinstance(d.get("qual"), dict):
+                ss.qual = d["qual"]
         log.info("state restored: equity=%.2f open=%s", a.equity,
                  [s.cfg.symbol for s in self.syms if s.eng.pos])
 
@@ -260,6 +296,8 @@ class Runtime:
     def _entries_allowed(self, ss: SymState, now: float) -> bool:
         if os.path.exists(self.stop_file) or self.flatten_req or ss.cfg.exit_only:
             return False
+        if not self._trading(ss):
+            return False
         if max(ss.errs.values()) >= self.p.max_error_streak:
             return False
         block = self.guard.entry_block(ss.cfg.symbol, now)
@@ -281,6 +319,70 @@ class Runtime:
             if ss.cfg.flatten_eod and local.strftime("%H:%M") >= self._minus3(ss.cfg.eod_time):
                 return False
         return True
+
+    def _trading(self, ss: SymState) -> bool:
+        """May this stream open trades automatically? (qualified by its own backtest, not switched off)"""
+        if ss.disabled or ss.cfg.exit_only:
+            return False
+        return (not self.gate) or bool(ss.qual and ss.qual.get("status") == "ok")
+
+    def _in_watch_hours(self, ss: SymState, now: float) -> bool:
+        """Bars are only worth their credits around the entry windows (or while a trade is on)."""
+        if ss.eng.pos is not None or ss.pending is not None or ss.last_eval is None or ss.needs_full:
+            return True
+        if not ss.cfg.windows or ss.cfg.provider == "binance":
+            return True
+        hhmm = self._local(ss, now).strftime("%H:%M")
+        m = int(hhmm[:2]) * 60 + int(hhmm[3:])
+        pad = 2 * ss.cfg.interval_minutes
+        for a, b in ss.cfg.windows:
+            lo = int(a[:2]) * 60 + int(a[3:]) - pad
+            hi = int(b[:2]) * 60 + int(b[3:]) + ss.cfg.interval_minutes
+            if lo <= m <= hi:
+                return True
+        return False
+
+    def _schedule_qual(self, ss: SymState, now: float) -> None:
+        if not self.gate or ss.qual_future is not None or now < ss.next_qual_try or ss.disabled:
+            return
+        q = ss.qual
+        fresh = q and q.get("status") in ("ok", "fail") and now - float(q.get("at", 0)) < qualify.MAX_AGE_H * 3600
+        if fresh:
+            return
+        b = ss.bar_prov.budget
+        if b is not None and not b.try_acquire(1.0, "qual"):
+            return
+        ss.next_qual_try = now + 1800.0                  # retry an error after 30 min
+        p, cfg, prov = self.p, ss.cfg, ss.bar_prov
+
+        def job():
+            df = prov.bars(cfg, qualify.HISTORY_BARS)
+            return qualify.qualify(df, cfg, p)
+        ss.qual_future = self.ex.submit(_timed, job)
+        ss.qual_started = now
+
+    def _harvest_qual(self, now: float) -> None:
+        for ss in self.syms:
+            fut = ss.qual_future
+            if fut is None:
+                continue
+            if not fut.done():
+                if now - ss.qual_started > 120:
+                    ss.qual_future = None
+                continue
+            ss.qual_future = None
+            try:
+                res, _ = fut.result()
+            except Exception as e:
+                ss.qual = {"status": "error", "at": now, "reason": redact(f"{type(e).__name__}: {e}")[:160]}
+                continue
+            old = (ss.qual or {}).get("status")
+            ss.qual = res
+            self.dirty = True
+            if res.get("status") != old:
+                verdict = "AUTO-TRADE ON" if res["status"] == "ok" else "watch only"
+                self.n.send(f"{ss.cfg.symbol}: qualification {res['status']} ({verdict}) - n={res.get('n')} "
+                            f"win={res.get('wr')}% avgR={res.get('avgR')} | {res.get('reason')}")
 
     @staticmethod
     def _minus3(hhmm: str) -> str:
@@ -308,6 +410,8 @@ class Runtime:
     def _schedule_bars(self, ss: SymState, now: float) -> None:
         if ss.bar_future is not None or now < ss.next_bar_try or not self._active(ss, now):
             return
+        if not self._in_watch_hours(ss, now):
+            return
         local = self._local(ss, now)
         if self._is_stock(ss) and not ss.store.df.empty:
             sess = cal.session(local.date())               # no new bar can exist before the first one closes
@@ -325,7 +429,8 @@ class Runtime:
         if not (L is None or ss.needs_full or local >= due_at):
             return
         b = ss.bar_prov.budget
-        if b is not None and not b.try_acquire(1.0):
+        tier = "bars" if (self._trading(ss) or ss.eng.pos is not None) else "scan"
+        if b is not None and not b.try_acquire(1.0, tier):
             return
         overdue = 0.0 if due_at is None else (local - due_at).total_seconds()
         ss.next_bar_try = now + (self.p.bar_retry_sec if overdue < 60 else 5.0 if overdue < 300 else 15.0)
@@ -503,6 +608,10 @@ class Runtime:
         ss.last_eval = last_ts
         self.dirty = True
         d = signals(add_indicators(closed, self.p), self.p, cfg)
+        try:
+            ss.plan = plan_levels(d, self.p, cfg)
+        except Exception as e:                                 # a plan bug must never block trading
+            ss.plan = {"note": f"plan error: {type(e).__name__}"}
         side, atr, close = int(d["side"].iloc[-1]), float(d["atr"].iloc[-1]), float(d["close"].iloc[-1])
         ss.atr = atr if math.isfinite(atr) and atr > 0 else ss.atr
         if side != 0:
@@ -636,7 +745,10 @@ class Runtime:
             p_ = ss.eng.pos
             q = ss.quote
             syms[ss.cfg.symbol] = {
-                "strategy": ss.cfg.strategy,
+                "strategy": ss.cfg.strategy, "ticker": ss.cfg.ticker, "interval": ss.cfg.interval,
+                "class": self.classes.get(ss.cfg.symbol, ss.cfg.kind),
+                "trading": self._trading(ss), "disabled": ss.disabled, "qual": ss.qual, "plan": ss.plan,
+                "windows": ss.cfg.windows, "win_bg": self._win_bg(ss, now), "allow_short": ss.cfg.allow_short,
                 "position": None if p_ is None else {
                     "side": "long" if p_.side == 1 else "short", "qty": p_.qty, "entry": p_.entry,
                     "stop": p_.stop, "target": p_.target,
@@ -678,11 +790,30 @@ class Runtime:
                 days = ["الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد"]
                 fx_market = {"open": False, "text": f"الذهب والعملات: مغلق - يفتح {days[o.weekday()]} {o:%H:%M} بغداد"}
         return {"time_utc": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
-                "market": market, "fx_market": fx_market, "mode": self.mode,
+                "market": market, "fx_market": fx_market, "mode": self.mode, "credits": self._credits(),
                 "equity": round(a.equity, 2), "day_start_equity": round(a.day_start_equity, 2),
                 "trades_today": a.trades_today, "consec_losses": a.consec_losses,
                 "stop_file": os.path.exists(self.stop_file), "flatten_file": os.path.exists(self.flatten_file),
                 "guardian": self.guard.status(now), "symbols": syms, "recent_trades": self.recent_trades[-10:]}
+
+    def _win_bg(self, ss: SymState, now: float) -> str:
+        """Entry windows shown in Baghdad time (follows US/EU daylight-saving changes automatically)."""
+        if not ss.cfg.windows:
+            return "24 ساعة"
+        day = self._local(ss, now).date()
+        out = []
+        for a, b in ss.cfg.windows:
+            conv = [datetime.combine(day, datetime.strptime(x, "%H:%M").time()).replace(
+                tzinfo=ZoneInfo(ss.cfg.tz)).astimezone(ZoneInfo("Asia/Baghdad")).strftime("%H:%M") for x in (a, b)]
+            out.append(f"{conv[0]}-{conv[1]}")
+        return "، ".join(out)
+
+    def _credits(self) -> Optional[dict]:
+        for prov in self.providers.values():
+            b = getattr(prov, "budget", None)
+            if b is not None and getattr(b, "per_day", 0):
+                return {"used": int(b.used_day), "cap": int(b.per_day)}
+        return None
 
     def _write_status(self, now: float) -> None:
         try:
@@ -705,6 +836,15 @@ class Runtime:
                     fn(ss, now)
                 except Exception:
                     log.exception("%s: scheduling error", ss.cfg.symbol)
+        for ss in self.syms:
+            try:
+                self._schedule_qual(ss, now)
+            except Exception:
+                log.exception("%s: qualification scheduling error", ss.cfg.symbol)
+        try:
+            self._harvest_qual(now)
+        except Exception:
+            log.exception("qualification harvest error")
         try:
             self._harvest(now)
         except Exception:
@@ -753,10 +893,11 @@ def main() -> None:
         raise SystemExit("Only MODE=paper is implemented. Live trading is intentionally not included.")
     p = get_params()
     try:
-        mode = read_trading_mode()
-        symbols = symbols_for_mode(mode)
+        items = wl.load()
+        symbols = wl.streams(items)
         apply_env_overrides(symbols)
         validate_config(p, symbols)
+        mode = "watchlist"
     except ConfigError as e:
         raise SystemExit(f"CONFIG ERROR: {e}")
 
@@ -771,15 +912,16 @@ def main() -> None:
     # changed by hand) is still managed until it closes - exits only, no new entries.
     for sym, d in ((st or {}).get("symbols") or {}).items():
         if d.get("position") and sym not in {s.symbol for s in symbols}:
-            known = {s.symbol: s for s in ALL_KNOWN}
+            known = {s.symbol: s for s in ALL_KNOWN + wl.streams([wl.validate_entry(e) for e in wl.DEFAULT])}
             if sym in known:
                 symbols = symbols + [dc_replace(known[sym], exit_only=True)]
                 apply_env_overrides(symbols[-1:])
-                notifier.send(f"{sym}: open position from the previous mode - managed in EXIT-ONLY mode until closed",
+                notifier.send(f"{sym}: open position on a symbol no longer watched - managed EXIT-ONLY until closed",
                               level=logging.WARNING)
     providers = make_providers(p, symbols)
     executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="io")
-    rt = Runtime(p, symbols, providers, PaperBroker(), store, notifier, executor, mode=mode)
+    rt = Runtime(p, symbols, providers, PaperBroker(), store, notifier, executor, mode=mode, gate=True,
+                 classes=wl.class_of(items))
 
     for note in store.notes:
         notifier.send(f"STATE WARNING: {note}", level=logging.ERROR)
@@ -789,21 +931,25 @@ def main() -> None:
         except Exception as e:
             notifier.send(f"STATE WARNING: could not apply saved state ({type(e).__name__}: {e}) - "
                           f"starting fresh; CHECK for open positions manually", level=logging.ERROR)
-            rt = Runtime(p, symbols, providers, PaperBroker(), store, notifier, executor, mode=mode)
+            rt = Runtime(p, symbols, providers, PaperBroker(), store, notifier, executor, mode=mode, gate=True,
+                 classes=wl.class_of(items))
+    off = wl.disabled_ids(items)
+    for ss in rt.syms:
+        ss.disabled = ss.cfg.symbol in off
     if any(s.kind == "stock" for s in symbols) and not cal.covers(datetime.now(timezone.utc).date()):
         notifier.send("WARNING: NYSE calendar in market_calendar.py does not cover today - "
                       "holidays/early closes are NOT known. Update it.", level=logging.WARNING)
 
     from telegram_ctl import TelegramControl
-    def _mode(m: str) -> str:
-        ok, msg = rt.request_mode(m)
-        if ok:
-            notifier.send(f"trading mode -> {m} (restarting)", level=logging.WARNING)
+    def _watch(action: str, data: dict) -> str:
+        ok, msg, restart = rt.watchlist_action(action, data)
+        if ok and restart:
+            notifier.send(f"watchlist {action} {data.get('symbol', '')} (restarting)", level=logging.WARNING)
             threading.Timer(2.0, rt.stopping.set).start()
         return msg
 
     ctl = TelegramControl(lambda: rt.status(time.time()),
-                          {"stop": STOP_FILE, "flatten": FLATTEN_FILE, "halt": "HALT"}, mode_fn=_mode)
+                          {"stop": STOP_FILE, "flatten": FLATTEN_FILE, "halt": "HALT"})
     ctl.start()
     if os.getenv("PORT"):                                     # web dashboard (Render / any host with a port)
         from dashboard import Dashboard
@@ -812,7 +958,8 @@ def main() -> None:
             notifier.send("DASHBOARD_PASSWORD is not set - the dashboard pages are locked (only /healthz works)",
                           level=logging.ERROR)
         Dashboard(lambda: rt.status(time.time()), ctl.handle, lambda: rt.last_alive, pw, tok,
-                  tail=LOG_TAIL, port=int(os.getenv("PORT")), restart_fn=lambda: rt.stopping.set()).start()
+                  tail=LOG_TAIL, port=int(os.getenv("PORT")), restart_fn=lambda: rt.stopping.set(),
+                  watch_fn=_watch).start()
 
     from remote import RemoteLink
     RemoteLink(os.getenv("NTFY_TOPIC", ""), os.getenv("MONITOR_TOKEN", ""), lambda: rt.status(time.time()),
@@ -824,7 +971,7 @@ def main() -> None:
         if sig is not None:
             signal.signal(sig, _bye)
 
-    notifier.send(f"Bot started (PAPER). mode={mode} symbols={[s.symbol for s in symbols]} equity={rt.acct.equity:.2f} "
+    notifier.send(f"Bot started (PAPER). watchlist streams={[s.symbol for s in symbols]} equity={rt.acct.equity:.2f} "
                   f"providers={{{', '.join(f'{s.symbol}: bars={s.provider} quotes={s.quote_src}' for s in symbols)}}}")
     try:
         rt.run()

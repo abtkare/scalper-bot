@@ -55,9 +55,19 @@ class Quote:
 # ------------------------------------------------------------------ rate budget
 class RateBudget:
     """Token bucket. Sustained rate = 75% of the plan limit and a small burst, so that even with
-    the provider's calendar-minute counting the plan limit is never exceeded."""
+    the provider's calendar-minute counting the plan limit is never exceeded.
 
-    def __init__(self, per_min: float, clock=time.time):
+    Optional daily cap (Twelve Data free plan: 800/day) with priority tiers, so that when credits run low
+    the bot stops SCANNING first and keeps the credits for managing open positions:
+        quote (open position)  -> may use the whole day
+        bars  (auto-traded)    -> up to cap - 60
+        scan / qual (watch-only streams, qualification) -> up to 70% of the cap"""
+    TIER_FRAC = {"quote": 1.0, "bars": None, "scan": 0.70, "qual": 0.70}
+
+    def __init__(self, per_min: float, clock=time.time, per_day: int = 0):
+        self.per_day = int(per_day or 0)
+        self.used_day = 0
+        self.day = None
         self.clock = clock
         self.rate = max(per_min * 0.75, 1.0) / 60.0
         self.cap = max(2.0, per_min * 0.25)
@@ -66,14 +76,26 @@ class RateBudget:
         self.blocked_until = 0.0
         self.lock = threading.Lock()
 
-    def try_acquire(self, n: float = 1.0) -> bool:
+    def _day_limit(self, tier: str) -> float:
+        if not self.per_day:
+            return float("inf")
+        frac = self.TIER_FRAC.get(tier, 1.0)
+        return self.per_day - 60 if frac is None else self.per_day * frac
+
+    def try_acquire(self, n: float = 1.0, tier: str = "quote") -> bool:
         with self.lock:
             now = self.clock()
+            day = time.strftime("%Y-%m-%d", time.gmtime(now))
+            if day != self.day:
+                self.day, self.used_day = day, 0
             self.tokens = min(self.cap, self.tokens + (now - self.t) * self.rate)
             self.t = now
             if now < self.blocked_until or self.tokens < n:
                 return False
+            if self.used_day + n > self._day_limit(tier):
+                return False
             self.tokens -= n
+            self.used_day += n
             return True
 
     def penalize(self, seconds: float) -> None:
@@ -155,7 +177,8 @@ class TwelveData(_Base):
     def __init__(self, p: Params, api_key: Optional[str] = None, budget: Optional[RateBudget] = None):
         super().__init__(p)
         self.key = api_key or os.getenv("TWELVE_DATA_API_KEY", "")
-        self.budget = budget if budget is not None else RateBudget(p.td_credits_per_min)
+        self.budget = budget if budget is not None else RateBudget(p.td_credits_per_min,
+                                                                    per_day=p.td_credits_per_day)
 
     def _get(self, path: str, params: dict) -> dict:
         r, js = self._request(TD_BASE + path, dict(params, apikey=self.key, format="JSON"))
@@ -209,20 +232,26 @@ class Binance(_Base):
         return js
 
     def bars(self, cfg: SymbolCfg, n: int) -> pd.DataFrame:
-        sym = cfg.provider_symbol or binance_symbol(cfg.symbol)
+        sym = binance_symbol(cfg.ticker)
         itv = self._ITV.get(cfg.interval)
         if not itv:
             raise ProviderError("data", f"unsupported interval {cfg.interval}")
         rows = self._get("/api/v3/klines", {"symbol": sym, "interval": itv, "limit": min(n, 1000)})
         if not isinstance(rows, list) or not rows:
             raise ProviderError("data", f"no klines for {sym}")
+        while len(rows) < n:                            # long history (qualification): page backwards
+            more = self._get("/api/v3/klines", {"symbol": sym, "interval": itv, "endTime": int(rows[0][0]) - 1,
+                                                "limit": min(n - len(rows), 1000)})
+            if not isinstance(more, list) or not more:
+                break
+            rows = more + rows
         df = clean_bars(klines_to_frame(rows))
         if df.empty:
             raise ProviderError("data", f"all klines invalid for {sym}")
         return df
 
     def quote(self, cfg: SymbolCfg) -> Quote:
-        sym = cfg.provider_symbol or binance_symbol(cfg.symbol)
+        sym = binance_symbol(cfg.ticker)
         js = self._get("/api/v3/ticker/bookTicker", {"symbol": sym})
         if not isinstance(js, dict):
             raise ProviderError("data", "unexpected bookTicker reply")

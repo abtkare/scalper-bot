@@ -13,3 +13,5 @@ out/*.csv
 data/*_1min.csv
 trading_mode.txt
 trading_mode.txt.tmp
+watchlist.json
+watchlist.json.tmp

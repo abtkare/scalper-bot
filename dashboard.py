@@ -2,7 +2,8 @@
 
   GET  /                 dashboard page (HTTP Basic auth: any user name + DASHBOARD_PASSWORD)
   GET  /api/status       JSON status          (Basic auth, or ?token=MONITOR_TOKEN)
-  POST /api/control      {"cmd": "stop|start|flatten|halt|resume|restart|mode_all|mode_fx|mode_qqq|mode_scalp|mode_both"}
+  POST /api/control      {"cmd": "stop|start|flatten|halt|resume|restart"}               (Basic auth)
+  POST /api/watchlist    {"action": "add|remove|on|off", "symbol", "class", "strategies", "id"}  (Basic auth)
   GET  /api/control?cmd=flatten&token=MONITOR_TOKEN                  (for the remote monitor)
   GET  /healthz          200 while the trade loop is alive, 503 if it stalled (> 90 s) - no auth
 
@@ -23,8 +24,8 @@ from typing import Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 log = logging.getLogger("dashboard")
-COMMANDS = ("stop", "start", "flatten", "halt", "resume", "restart",
-            "mode_all", "mode_fx", "mode_qqq", "mode_scalp", "mode_both")
+COMMANDS = ("stop", "start", "flatten", "halt", "resume", "restart")
+WATCH_ACTIONS = ("add", "remove", "on", "off")
 
 
 class LogTail(logging.Handler):
@@ -45,7 +46,9 @@ class LogTail(logging.Handler):
 class Dashboard:
     def __init__(self, status_fn: Callable[[], dict], command_fn: Callable[[str], str],
                  alive_fn: Callable[[], float], password: str, token: str, tail: Optional[LogTail] = None,
-                 port: int = 8000, restart_fn: Optional[Callable[[], None]] = None):
+                 port: int = 8000, restart_fn: Optional[Callable[[], None]] = None,
+                 watch_fn: Optional[Callable[[str, dict], str]] = None):
+        self.watch_fn = watch_fn
         self.status_fn, self.command_fn, self.alive_fn = status_fn, command_fn, alive_fn
         self.password, self.token, self.tail, self.port = password, token, tail, port
         self.started = time.time()
@@ -118,10 +121,7 @@ class Dashboard:
                 if u.path == "/api/control":
                     if not tok:                          # GET control only with the monitor token
                         return self._deny()
-                    c = (q.get("cmd") or [""])[0]
-                    if c.strip().lower().startswith("mode_"):    # mode changes only from the owner's dashboard
-                        return self._send(403, {"error": "mode change needs the dashboard password"})
-                    return self._control(c, "monitor")
+                    return self._control((q.get("cmd") or [""])[0], "monitor")
                 if u.path in ("/", "/index.html"):
                     if not basic:
                         return self._deny()
@@ -130,10 +130,24 @@ class Dashboard:
 
             def do_POST(self):
                 u = urlparse(self.path)
-                if u.path != "/api/control":
+                if u.path not in ("/api/control", "/api/watchlist"):
                     return self._send(404, {"error": "not found"})
                 if not dash._basic_ok(self.headers.get("Authorization")):
                     return self._deny()
+                if u.path == "/api/watchlist":
+                    try:
+                        n = min(int(self.headers.get("Content-Length") or 0), 2000)
+                        body = json.loads(self.rfile.read(n) or b"{}")
+                        if not isinstance(body, dict):
+                            raise ValueError
+                    except Exception:
+                        return self._send(400, {"error": "bad json"})
+                    action = str(body.get("action", "")).lower()
+                    if action not in WATCH_ACTIONS or dash.watch_fn is None:
+                        return self._send(400, {"error": f"action must be one of {WATCH_ACTIONS}"})
+                    msg = dash.watch_fn(action, body)
+                    log.warning("watchlist %s %s from dashboard", action, body.get("symbol") or body.get("id"))
+                    return self._send(200, {"ok": True, "message": msg})
                 try:
                     n = min(int(self.headers.get("Content-Length") or 0), 1000)
                     cmd = json.loads(self.rfile.read(n) or b"{}").get("cmd", "")
@@ -150,8 +164,6 @@ class Dashboard:
                         return self._send(400, {"error": "restart not available"})
                     threading.Timer(2.0, dash.restart_fn).start()
                     msg = "جارٍ التحديث: البوت يحفظ حالته ويعيد التشغيل بأحدث كود من GitHub خلال دقيقة."
-                elif cmd.startswith("mode_"):
-                    msg = dash.command_fn("/mode " + cmd[5:])
                 else:
                     msg = dash.command_fn("/" + cmd)
                 log.warning("control %s from %s", cmd, who)
@@ -208,14 +220,21 @@ h2{font-size:15px;margin:18px 0 8px}#msg{min-height:20px;font-size:13px}
  </div>
  <button class="bu" style="width:100%;margin-top:2px" onclick="cmd('restart','تحديث البوت بأحدث كود من GitHub؟ (الحالة والصفقات تبقى محفوظة)')">🔄 تحديث البوت من GitHub</button>
  <div id="msg" class="mut"></div></div>
-<h2>ماذا يتداول البوت؟</h2><div class="c"><div class="k">الوضع الحالي: <b id="mode">–</b> · التغيير مرفوض أثناء وجود صفقة مفتوحة، ويعيد تشغيل البوت تلقائياً</div>
- <div class="btns">
-  <button class="bs" id="m_all" onclick="cmd('mode_all','تداول الكل: QQQ + الذهب + EURUSD + GBPUSD + USDJPY؟')">🌍 الكل</button>
-  <button class="bs" id="m_fx" onclick="cmd('mode_fx','الذهب والعملات فقط (بدون QQQ)؟')">🥇 ذهب وعملات</button>
-  <button class="bs" id="m_qqq" onclick="cmd('mode_qqq','QQQ فقط (اختراق)؟')">📈 QQQ فقط</button>
-  <button class="bs" id="m_scalp" onclick="cmd('mode_scalp','سكالبينج QQQ فقط؟ (تجريبي - نسبة ربح ~75% وربح صغير لكل صفقة)')">⚡ سكالبينج QQQ</button>
- </div></div>
-<h2>الرموز والصفقات المفتوحة</h2><div class="c scroll"><table id="syms"></table></div>
+<h2>قائمة المراقبة وخطط الدخول</h2>
+<div class="mut" id="wlsub">يتداول البوت آلياً فقط ما نجح في اختبار تاريخه (✅). الباقي مراقبة مع خطة جاهزة.</div>
+<div id="wl"></div>
+<div class="c" style="margin-top:10px"><div class="k" style="margin-bottom:6px">➕ إضافة رمز (مؤشر، زوج عملات، معدن، عملة رقمية)</div>
+ <input id="nsym" placeholder="مثال: XAU/USD أو EUR/USD أو SPY أو BTC/USD" dir="ltr" style="width:100%;font:inherit;padding:11px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--tx)">
+ <select id="ncls" style="width:100%;font:inherit;padding:10px;margin-top:8px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--tx)">
+  <option value="">النوع: تلقائي</option><option value="etf">مؤشر / صندوق (SPY, DIA, QQQ)</option><option value="fx">زوج عملات</option><option value="metal">معادن (ذهب، فضة)</option><option value="crypto">عملة رقمية</option></select>
+ <div style="margin:8px 0;display:flex;gap:14px;flex-wrap:wrap">
+  <label><input type="checkbox" id="st_scalp" checked> سكالبينج (15 د)</label>
+  <label><input type="checkbox" id="st_rsi2"> ارتداد RSI2 (ساعة)</label>
+  <label><input type="checkbox" id="st_breakout"> اختراق</label></div>
+ <button class="bu" style="width:100%" onclick="addSym()">➕ إضافة إلى المراقبة</button>
+ <div class="mut" style="margin-top:6px">داو جونز = DIA · ناسداك = QQQ · S&P 500 = SPY. الفضة والنفط تحتاجان خطة Twelve Data مدفوعة.</div>
+ <div id="wmsg" class="mut"></div></div>
+<h2>الصفقات المفتوحة</h2><div class="c scroll"><table id="syms"></table></div>
 <h2>الحارس</h2><div class="c" id="guard">–</div>
 <h2>آخر الصفقات</h2><div class="c scroll"><table id="trades"></table></div>
 <h2>السجل</h2><div class="c"><pre id="log" dir="ltr" style="text-align:left"></pre></div>
@@ -243,13 +262,11 @@ async function load(){
   if(s.market) fl.push('<span class="badge '+(s.market.open?'ok':'warn')+'">'+esc(s.market.text)+'</span>');
   if(s.fx_market) fl.push('<span class="badge '+(s.fx_market.open?'ok':'warn')+'">'+esc(s.fx_market.text)+'</span>');
   $('flags').innerHTML=fl.join('');
-  const MN={all:'الكل: QQQ + ذهب + عملات',fx:'الذهب والعملات',qqq:'QQQ فقط',scalp:'سكالبينج QQQ',both:'QQQ اختراق + سكالبينج'};
-  $('mode').textContent=MN[s.mode]||s.mode||'–';
-  for(const m of ['all','fx','qqq','scalp']){const b=$('m_'+m); if(b) b.className=(s.mode==m?'bu':'bs');}
+  renderWL(s);
   let h='<tr><th>الرمز</th><th>الاستراتيجية</th><th>الحالة</th><th>السعر</th><th>دخول</th><th>وقف</th><th>هدف</th><th>غير محقق</th><th>عمر السعر</th></tr>';
-  for(const [k,v] of Object.entries(s.symbols||{})){const p=v.position;
+  for(const [k,v] of Object.entries(s.symbols||{})){const p=v.position; if(!p) continue;
    h+='<tr><td>'+esc(k)+'</td><td>'+esc({breakout:'اختراق',scalp:'سكالبينج',pullback:'سحب',rsi2:'ارتداد RSI2'}[v.strategy]||v.strategy||'')+'</td><td>'+(p?(p.side=='long'?'شراء ':'بيع ')+p.qty:'بلا صفقة')+'</td><td>'+f(v.last_price)+'</td><td>'+(p?f(p.entry):'–')+'</td><td>'+(p?f(p.stop):'–')+'</td><td>'+(p?f(p.target):'–')+'</td><td class="'+(p&&p.unrealized<0?'neg':'pos')+'">'+(p?f(p.unrealized):'–')+'</td><td>'+(v.quote_age_s==null?'–':v.quote_age_s+' ث')+'</td></tr>';}
-  $('syms').innerHTML=h;
+  $('syms').innerHTML=Object.values(s.symbols||{}).some(v=>v.position)?h:'<tr><td>لا صفقات مفتوحة</td></tr>';
   let gh=[]; if(g.peak) gh.push('قمة الرصيد: '+f(g.peak));
   for(const [k,v] of Object.entries(g.paused||{})) gh.push('موقوف '+esc(k)+' لمدة '+v+' د');
   for(const [k,v] of Object.entries(g.recent_avg_R||{})) gh.push('متوسط آخر الصفقات '+esc(k)+': '+v+'R');
@@ -265,5 +282,41 @@ async function load(){
 async function cmd(c,q){ if(!confirm(q)) return;
  const r=await fetch('api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:c})});
  const j=await r.json().catch(()=>({})); $('msg').textContent=j.message||j.error||r.status; load(); }
+const SN={scalp:'سكالبينج',rsi2:'ارتداد RSI2',breakout:'اختراق',pullback:'سحب'};
+const CN={etf:'مؤشر',fx:'عملات',metal:'معادن',crypto:'رقمية',stock:'مؤشر'};
+function dp(x){if(x==null)return'–';const a=Math.abs(x);return Number(x).toLocaleString('en-US',{maximumFractionDigits:a>=1000?1:a>=10?2:a>=1?4:6});}
+function sideTxt(pl,buy){ if(!pl) return '<span class="mut">'+(buy?'لا شراء الآن':'لا بيع الآن')+'</span>';
+ const w=buy?'شراء':'بيع', op=pl.op=='<'?'تحت':'فوق';
+ return '<b class="'+(buy?'pos':'neg')+'">'+w+'</b> إذا أغلقت الشمعة '+op+' <b>'+dp(pl.trigger)+'</b> <span class="mut">('+(pl.dist_pct>0?'+':'')+pl.dist_pct+'%)</span>'+(pl.bound!=null?' <span class="mut">و'+(buy?'فوق':'تحت')+' '+dp(pl.bound)+'</span>':'')+'<br><span class="mut">وقف</span> '+dp(pl.stop)+' · <span class="mut">هدف</span> '+dp(pl.target);}
+function stTxt(v){ if(v.disabled) return '<span class="badge warn">⏸ موقوف يدوياً</span>';
+ if(v.trading) return '<span class="badge ok">✅ تداول آلي</span>';
+ const q=v.qual; if(!q) return '<span class="badge warn">⏳ قيد الاختبار</span>';
+ if(q.status=='error') return '<span class="badge bad">⚠️ '+esc(q.reason||'خطأ')+'</span>';
+ return '<span class="badge warn">👁 مراقبة فقط</span>';}
+function qTxt(q){ if(!q||q.n==null) return ''; let t='اختبار تاريخه: '+q.n+' صفقة';
+ if(q.wr!=null) t+=' · ربح '+q.wr+'% · '+(q.avgR>0?'+':'')+q.avgR+'R · معامل '+q.pf;
+ return '<div class="mut" style="font-size:12px">'+esc(t)+(q.status!='ok'&&q.reason?' — '+esc(q.reason):'')+'</div>';}
+function renderWL(s){ const by={}; for(const [id,v] of Object.entries(s.symbols||{})){(by[v.ticker||id]=by[v.ticker||id]||[]).push([id,v]);}
+ const near=a=>Math.min(...a.map(([i,v])=>{const p=v.plan||{};return Math.min(p.long?Math.abs(p.long.dist_pct):99,p.short?Math.abs(p.short.dist_pct):99);}));
+ const keys=Object.keys(by).sort((a,b)=>near(by[a])-near(by[b]));
+ let h='';
+ for(const t of keys){ const rows=by[t]; const v0=rows[0][1]; const px=(v0.plan&&v0.plan.price)||v0.last_price;
+  h+='<div class="c" style="margin-top:8px"><div style="display:flex;justify-content:space-between;align-items:center"><div><b dir="ltr">'+esc(t)+'</b> <span class="mut">'+esc(CN[v0.class]||v0.class||'')+' · '+dp(px)+'</span></div>'
+   +'<button class="bs" style="padding:6px 10px;font-size:12px" onclick="wl(\'remove\',{symbol:\''+esc(t)+'\'},\'حذف '+esc(t)+' من المراقبة؟\')">✕ حذف</button></div>';
+  for(const [id,v] of rows){ const p=v.plan||{};
+   h+='<div style="border-top:1px solid var(--line);margin-top:8px;padding-top:8px"><div style="display:flex;justify-content:space-between;gap:6px;flex-wrap:wrap"><div><b>'+esc(SN[v.strategy]||v.strategy)+'</b> <span class="mut">'+esc(v.interval||'')+(v.win_bg?' · الدخول '+esc(v.win_bg)+' بغداد':'')+'</span></div><div>'+stTxt(v)+'</div></div>'
+    +'<div style="margin-top:4px">'+sideTxt(p.long,true)+'</div>'+(v.allow_short?'<div style="margin-top:4px">'+sideTxt(p.short,false)+'</div>':'')
+    +(p.note?'<div class="mut" style="font-size:12px">'+esc(p.note)+'</div>':'')+(p.bar?'<div class="mut" style="font-size:11px">آخر شمعة: '+esc(String(p.bar).slice(5,16))+'</div>':'<div class="mut" style="font-size:12px">بانتظار أول بيانات…</div>')
+    +qTxt(v.qual)
+    +'<button class="'+(v.disabled?'br':'bs')+'" style="padding:6px 10px;font-size:12px;margin-top:6px" onclick="wl(\''+(v.disabled?'on':'off')+'\',{id:\''+esc(id)+'\'},null)">'+(v.disabled?'▶ تفعيل التداول الآلي':'⏸ إيقاف التداول الآلي لهذا السطر')+'</button></div>';}
+  h+='</div>';}
+ $('wl').innerHTML=h||'<div class="c">القائمة فارغة</div>';
+ const cr=s.credits; $('wlsub').textContent='يتداول البوت آلياً فقط ما نجح في اختبار تاريخه (✅). الباقي مراقبة مع خطة جاهزة.'+(cr?' · رصيد بيانات اليوم: '+cr.used+' / '+cr.cap:'');}
+async function wl(action,body,q){ if(q&&!confirm(q)) return; body.action=action;
+ const r=await fetch('api/watchlist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ const j=await r.json().catch(()=>({})); $('wmsg').textContent=j.message||j.error||r.status; alert(j.message||j.error||r.status); load(); }
+function addSym(){ const sym=$('nsym').value.trim().toUpperCase(); if(!sym){alert('اكتب الرمز');return;}
+ const st=['scalp','rsi2','breakout'].filter(x=>$('st_'+x).checked); if(!st.length){alert('اختر استراتيجية واحدة على الأقل');return;}
+ wl('add',{symbol:sym,'class':$('ncls').value,strategies:st},'إضافة '+sym+'؟ (يعيد البوت التشغيل)'); }
 load(); setInterval(load,5000);
 </script></body></html>"""

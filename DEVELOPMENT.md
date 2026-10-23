@@ -36,6 +36,8 @@
 | `telegram_ctl.py` | أوامر تيليغرام (اختياري) |
 | `providers.py` / `data.py` | مزوّدو البيانات (Twelve Data، Binance)، تنظيف الشموع |
 | `broker.py` | طبقة التنفيذ. `PaperBroker` حالياً؛ الوسيط الحقيقي يُكتب هنا (cTrader مثلاً) |
+| `watchlist.py` | قائمة المراقبة (`watchlist.json`)، قوالب كل فئة (مؤشر/عملات/معادن/رقمية) وكل استراتيجية |
+| `qualify.py` | بوابة الاختبار: سطر يتداول آلياً فقط إن ربح على تاريخه |
 | `fx_hours.py` | ساعات الذهب والعملات (الأحد 17:00/18:00 → الجمعة 17:00 نيويورك، استراحة الذهب) |
 | `market_calendar.py` | عطل وأيام الإغلاق المبكر لبورصة نيويورك 2026–2027 |
 | `backtest.py` | الاختبار التاريخي بنفس المحرك |
@@ -49,7 +51,7 @@
 1. **أي تغيير في الاستراتيجية أو الإعدادات = اختبار تاريخي أولاً:** `python backtest.py --all` وقارن التدريب (60%) بالاختبار (40%). إن ساءت النتيجة خارج العيّنة فلا ترفع.
 2. **شغّل كل الاختبارات قبل الرفع:**
    ```
-   python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py
+   python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py && python test_watchlist.py
    ```
 3. **لا تضع أي سر في المستودع** (المفتاح، كلمة سر اللوحة، MONITOR_TOKEN، NTFY_TOPIC). هذه تُكتب فقط في إعدادات الحاوية على هوستنجر.
 4. الحارس والأزرار **تقلل المخاطرة فقط**؛ لا تضف أي طريق يفتح صفقة من خارج الاستراتيجية.
@@ -62,7 +64,7 @@
 | `INITIAL_EQUITY` | 1000 | الرصيد الوهمي عند البدء (أول تشغيل فقط) |
 | `DAILY_LOSS_CAP` | 0.03 | إيقاف اليوم عند −3% |
 | `MAX_TRADES_PER_DAY` | 10 | |
-| `TRADING_MODE` | all | `all` / `fx` / `qqq` / `scalp` / `both` (الأسهل: أزرار لوحة التحكم) |
+| `TD_CREDITS_PER_DAY` | 800 | الحد اليومي لخطة Twelve Data (المراقبة تتوقف عند 70%) |
 | `QUOTE_POLL_SEC` | 20 | فترة جلب السعر أثناء الصفقة (الخطة المجانية لـ Twelve Data: 800 طلب/يوم) |
 | `GUARD_MAX_DRAWDOWN_PCT` | 6 | تجميد عند تراجع 6% من القمة |
 | `GUARD_SHOCK_ATR` | 3 | خروج فوري عند حركة عنيفة ضد الصفقة |

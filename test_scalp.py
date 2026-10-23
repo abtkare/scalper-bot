@@ -163,33 +163,6 @@ def test_modes():
     ok("modes all/fx/qqq/scalp/both build valid configs; file > env > default; legacy names ok; bad values refused")
 
 
-def test_mode_switch_refused_with_position():
-    e = tr.Env(tr.ramp(tr.T0 + 450, 0.0), cfg=_scalp_test_cfg(), sig_side=1)
-    mf = os.path.join(e.tmp, "trading_mode.txt")
-    assert e.run(400, until=lambda: e.ss.eng.pos is not None)
-    okk, msg = e.rt.request_mode("both", mf)
-    assert not okk and "مرفوض" in msg and not os.path.exists(mf)
-    e.ss.eng.pos = None
-    okk, msg = e.rt.request_mode("both", mf)
-    assert okk and open(mf).read().strip() == "both"
-    okk, _ = e.rt.request_mode("nonsense", mf)
-    assert not okk
-    ok("mode switch refused while a position is open; accepted (file written) when flat")
-
-
-def test_telegram_and_dashboard_mode():
-    calls = []
-    ctl = TelegramControl(lambda: {"mode": "all"}, {"stop": "s", "flatten": "f", "halt": "h"},
-                          token="", chat="", mode_fn=lambda m: calls.append(m) or "done")
-    assert "all" in ctl.handle("/mode")
-    assert ctl.handle("/mode scalp") == "done" and calls == ["scalp"]
-    assert "/mode" in ctl.handle("/help")
-    import dashboard
-    assert {"mode_all", "mode_fx", "mode_qqq", "mode_scalp"} <= set(dashboard.COMMANDS)
-    assert all(f"m_{m}" in dashboard.PAGE for m in ("all", "fx", "qqq", "scalp"))
-    ok("/mode works from Telegram; dashboard has the mode buttons (all / fx / qqq / scalp)")
-
-
 def test_leftover_position_exit_only():
     cfg = _scalp_test_cfg()
     cfg.exit_only = True

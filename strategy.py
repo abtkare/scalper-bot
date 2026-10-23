@@ -16,6 +16,8 @@ open. Nothing here looks into the future.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -37,6 +39,7 @@ def add_indicators(df: pd.DataFrame, p: Params) -> pd.DataFrame:
     up2 = up.ewm(alpha=0.5, adjust=False).mean()
     dn2 = dn.ewm(alpha=0.5, adjust=False).mean()
     d["rsi2"] = (100.0 - 100.0 / (1.0 + up2 / dn2)).fillna(50.0)
+    d["up2"], d["dn2"] = up2, dn2
 
     pc = c.shift(1)
     tr = pd.concat(
@@ -133,4 +136,90 @@ def _finish(d, p, scfg, long_sig, short_sig):
     if scfg.strategy in ("scalp", "rsi2"):
         warmup = max(warmup, 200)                     # EMA200 needs history before it means anything
     out.iloc[:warmup, out.columns.get_loc("side")] = 0
+    return out
+
+
+# ---------------------------------------------------------------- pre-computed trade plans (watchlist)
+def _rsi2_trigger(c0: float, U: float, D: float, th: float, long: bool) -> float:
+    """Close price at which RSI(2) of the NEXT bar crosses `th` (long: below th, short: above 100-th).
+    RSI(2) uses Wilder smoothing with alpha 0.5:  U' = U/2 + max(dc,0)/2,  D' = D/2 + max(-dc,0)/2."""
+    if long:
+        r = th / (100.0 - th)                       # need U'/D' < r
+        if D * r >= U:                              # already oversold without a move: threshold is above c0
+            return c0 + (r * D - U)
+        return c0 - (U / r - D)
+    r = (100.0 - th) / th                           # need U'/D' > r
+    if U >= r * D:
+        return c0 - (U - r * D) / r
+    return c0 + (r * D - U)
+
+
+def plan_levels(d: pd.DataFrame, p: Params, scfg: SymbolCfg) -> dict:
+    """What the strategy will do on the NEXT bar close, as concrete price levels.
+
+    Returns {"price", "atr", "bar", "long": {...} | None, "short": {...} | None, "note"} where each side is
+    {"trigger", "op" ("<=" / ">="), "entry", "stop", "target", "dist_pct"}: if the next bar CLOSES beyond
+    the trigger the bot buys/sells at the following bar's open (~entry) with that stop and target.
+    Levels move a little with every bar (ATR / VWAP / averages update) - they are re-computed each bar."""
+    last = d.iloc[-1]
+    c, atr = float(last["close"]), float(last["atr"])
+    out = {"price": c, "atr": atr, "bar": str(d.index[-1]), "long": None, "short": None, "note": ""}
+    if not (atr > 0 and c > 0):
+        out["note"] = "بيانات غير كافية"
+        return out
+    stop_atr, target_atr = stop_target(p, scfg)
+    long_ok, short_ok = True, bool(scfg.allow_short)
+    note = []
+    if scfg.strategy == "breakout":
+        n = scfg.donchian_n
+        trig_l = float(d["high"].iloc[-n:].max())
+        trig_s = float(d["low"].iloc[-n:].min())
+        af, as_ = 2.0 / (p.ema_fast + 1), 2.0 / (p.ema_slow + 1)
+
+        def trend_after(x):                          # EMA20 - EMA50 if the next bar closes at x
+            return (last["ema_f"] + af * (x - last["ema_f"])) - (last["ema_s"] + as_ * (x - last["ema_s"]))
+        if not trend_after(trig_l) > 0:
+            long_ok = False
+            note.append("الاتجاه ليس صاعداً: لا شراء")
+        if not trend_after(trig_s) < 0:
+            short_ok = False
+        op_l, op_s = ">", "<"
+    elif scfg.strategy == "scalp":
+        trig_l = float(last["vwap"] - scfg.vwap_k * atr)
+        trig_s = float(last["vwap"] + scfg.vwap_k * atr)
+        op_l, op_s = "<", ">"
+    elif scfg.strategy == "rsi2":
+        U, D = float(last["up2"]), float(last["dn2"])
+        trig_l = _rsi2_trigger(c, U, D, scfg.rsi2_th, True)
+        trig_s = _rsi2_trigger(c, U, D, scfg.rsi2_th, False)
+        op_l, op_s = "<", ">"
+    else:
+        out["note"] = "لا خطة لهذه الاستراتيجية"
+        return out
+    bound = None
+    if scfg.strategy != "breakout":
+        # trend filter: the triggering close must stay on the right side of EMA200
+        # (close > EMA200_next  <=>  close > EMA200_now, because EMA moves toward the close)
+        bound = float(last["ema200"])
+        if not trig_l > bound:
+            long_ok = False
+        if not trig_s < bound:
+            short_ok = False
+        if not long_ok and short_ok:
+            note.append("السعر تحت EMA200: بيع فقط")
+        elif long_ok and not short_ok and scfg.allow_short:
+            note.append("السعر فوق EMA200: شراء فقط")
+
+    def side(trig, op, sgn):
+        out_ = {"trigger": round(trig, 6), "op": op, "entry": round(trig, 6),
+                "stop": round(trig - sgn * stop_atr * atr, 6), "target": round(trig + sgn * target_atr * atr, 6),
+                "dist_pct": round((trig / c - 1.0) * 100.0, 3)}
+        if bound is not None:
+            out_["bound"] = round(bound, 6)            # long: close must stay ABOVE it, short: BELOW it
+        return out_
+    if long_ok and math.isfinite(trig_l) and trig_l > 0:
+        out["long"] = side(trig_l, op_l, 1)
+    if short_ok and math.isfinite(trig_s) and trig_s > 0:
+        out["short"] = side(trig_s, op_s, -1)
+    out["note"] = "، ".join(note)
     return out

@@ -65,6 +65,7 @@ class Params:
     max_tick_jump_pct: float = 3.0   # a single tick moving more than this must be confirmed
     max_error_streak: int = 8        # N consecutive data errors -> block NEW entries
     td_credits_per_min: int = 8      # your Twelve Data plan's credits/minute (free plan = 8)
+    td_credits_per_day: int = 800    # daily cap of your plan (free = 800; 0 = no daily cap)
     http_connect_timeout: float = 3.0
     http_read_timeout: float = 5.0
 
