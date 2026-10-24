@@ -108,7 +108,7 @@ class RemoteLink:
                 "fw": {k: [f.get("n"), f.get("w"), f.get("sumR"), f.get("pnl")]
                        for k, v in (st.get("symbols") or {}).items() for f in [v.get("fw") or {}] if f.get("n")},
                 "off": {k: v.get("auto_off") for k, v in (st.get("symbols") or {}).items() if v.get("auto_off")},
-                # v11 measured slippage per stream [trades, avg entry bps, avg exit bps]
+                # v14 measured slippage per stream [trades, avg entry bps, avg exit bps]
                 "sl": {k: [x.get("n"), x.get("in"), x.get("out")]
                        for k, v in (st.get("symbols") or {}).items() for x in [v.get("slip") or {}] if x.get("n")},
                 "nt": [self.sent_today, self.dropped_today],          # ntfy messages sent / dropped today

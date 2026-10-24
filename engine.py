@@ -30,7 +30,7 @@ class Position:
     opened_epoch: float = 0.0    # wall-clock time of the fill (live bot)
     monitor_gap: bool = False    # True if live prices were unavailable for a while (enables wick backstop)
     client_id: str = ""
-    stop0: float = 0.0           # initial stop (v11: the live stop may trail behind confirmed swings)
+    stop0: float = 0.0           # initial stop (v14: the live stop may trail behind confirmed swings)
     planned: float = 0.0         # price the strategy planned to enter at (signal close) -> entry slippage
     trail_moves: int = 0         # how many times the stop was moved behind a new swing
     order_px: float = 0.0        # live price when the order was sent -> broker fill slippage
@@ -176,7 +176,7 @@ class SymbolEngine:
         pos.planned = planned or price
         return pos
 
-    # ---- trailing stop behind confirmed swings (v11) --------------------
+    # ---- trailing stop behind confirmed swings (v14) --------------------
     def trail_update(self, swing_lo: float, swing_hi: float, atr: float, close: float) -> bool:
         """After a bar CLOSES: move the stop behind the last confirmed swing low (long) / high (short),
         only in the profitable direction and only once the trade is `trail_after_r` R in profit.

@@ -1,5 +1,5 @@
-"""v11 tests: swing trailing stop, slippage (backtest + live measurement), chart/analysis feed.
-Run: python test_v11.py   (no network)"""
+"""v14 tests: swing trailing stop, slippage (backtest + live measurement), chart/analysis feed.
+Run: python test_v14.py   (no network)"""
 import json
 import logging
 import math
@@ -172,4 +172,4 @@ if __name__ == "__main__":
     for fn in (test_trail_rules, test_no_target_plan, test_backtest_slippage, test_adopted_exits,
                test_position_compat, test_chart_and_analysis, test_live_trail_and_slip):
         fn()
-    print(f"all {len(PASSED)} v11 tests passed")
+    print(f"all {len(PASSED)} v14 tests passed")

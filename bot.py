@@ -121,7 +121,7 @@ class SymState:
         self.flat_min = 16 * 60 - (int(cfg.eod_time[:2]) * 60 + int(cfg.eod_time[3:]))   # 5 for "15:55"
         self.chart: Optional[dict] = None                  # last closed candles + overlays (dashboard)
         self.analysis: Optional[dict] = None               # plain-Arabic reading (dashboard)
-        self.slip = {"n": 0, "in": 0.0, "out": 0.0, "fill": 0.0}   # measured slippage, bps sums (v11)
+        self.slip = {"n": 0, "in": 0.0, "out": 0.0, "fill": 0.0}   # measured slippage, bps sums (v14)
 
 
 # ---------------------------------------------------------------- the bot
@@ -709,7 +709,7 @@ class Runtime:
             self._create_pending(ss, side, atr, close, last_ts, now)
 
     def _trail(self, ss: SymState, d: pd.DataFrame, atr: float, close: float, now: float) -> None:
-        """v11: after a bar closes, move the stop behind the last confirmed swing (never wider). The tick loop
+        """v14: after a bar closes, move the stop behind the last confirmed swing (never wider). The tick loop
         then exits at the new stop. On cTrader the server-side stop stays at the original level as a backstop."""
         try:
             r = structure.analyze(d.iloc[-300:], ss.cfg.swing_k).iloc[-1]

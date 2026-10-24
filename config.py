@@ -50,7 +50,7 @@ class Params:
     target_atr: float = 1.5          # target distance = target_atr * ATR
     # Skip setups whose target is not at least N x the round-trip cost.
     min_target_cost_multiple: float = 3.0
-    # v11: adverse slippage (bps) added to every MARKET fill in the backtest and the qualification gate,
+    # v14: adverse slippage (bps) added to every MARKET fill in the backtest and the qualification gate,
     # on top of cost_bps. Live fills record their real slippage (trades_live.csv slip_in_bps / slip_out_bps).
     bt_slip_bps: float = 0.25
 
@@ -98,7 +98,7 @@ class SymbolCfg:
     exit_only: bool = False          # set automatically for a leftover position of a mode that is switched off
     stop_atr: float = 0.0            # per-symbol overrides (0 = use Params.stop_atr / target_atr)
     target_atr: float = 0.0
-    # v11 exits from market structure (RESEARCH.md section 15). trail="swing": after each CLOSED bar the stop
+    # v14 exits from market structure (RESEARCH.md section 15). trail="swing": after each CLOSED bar the stop
     # moves behind the last confirmed swing low (long) / high (short), never wider, once trail_after_r R ahead.
     trail: str = ""
     trail_after_r: float = 0.5
@@ -175,8 +175,8 @@ def _fx(sym: str, cost: float) -> SymbolCfg:
     )
 
 
-GOLD = replace(_fx("XAU/USD", 0.5), trail="swing", trail_after_r=0.5, trail_no_target=True)   # v11
-EURUSD = replace(_fx("EUR/USD", 0.5), trail="swing", trail_after_r=0.5)                         # v11
+GOLD = replace(_fx("XAU/USD", 0.5), trail="swing", trail_after_r=0.5, trail_no_target=True)   # v14
+EURUSD = replace(_fx("EUR/USD", 0.5), trail="swing", trail_after_r=0.5)                         # v14
 GBPUSD = _fx("GBP/USD", 0.6)
 USDJPY = _fx("USD/JPY", 0.5)
 FX_SET = [GOLD, EURUSD, GBPUSD, USDJPY]

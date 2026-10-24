@@ -1,4 +1,4 @@
-"""Per-stream chart data + plain-Arabic analysis for the dashboard (v11).
+"""Per-stream chart data + plain-Arabic analysis for the dashboard (v14).
 
 INFORMATIONAL ONLY: nothing here opens, closes or changes a trade. It reads the same closed bars the strategy
 used and explains them: what the strategy waits for, the market structure, the key levels, the last candle,

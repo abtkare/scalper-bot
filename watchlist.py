@@ -80,7 +80,7 @@ def stream_id(symbol: str, strategy: str, cls: str) -> str:
     return f"{symbol}-{ {'scalp': 'SCALP', 'rsi2': 'RSI2', 'breakout': 'BRK'}[strategy] }".replace(" ", "")
 
 
-# v11 (RESEARCH.md section 15): exits behind confirmed swings, adopted only where they beat the fixed exit in
+# v14 (RESEARCH.md section 15): exits behind confirmed swings, adopted only where they beat the fixed exit in
 # BOTH halves of the history and stayed better with 0.25-1 bps extra slippage.
 EXIT_OVERRIDES: Dict[str, dict] = {
     "XAU/USD:rsi2": dict(trail="swing", trail_after_r=0.5, trail_no_target=True),   # +0.34R -> +0.49R

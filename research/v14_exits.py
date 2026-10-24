@@ -1,6 +1,6 @@
-"""v11 research: (1) slippage sensitivity, (2) trailing stops behind confirmed swings, (3) new index lines.
+"""v14 research: (1) slippage sensitivity, (2) trailing stops behind confirmed swings, (3) new index lines.
 Adoption rule for a variant: avg R better than the baseline in BOTH halves (first 60% / last 40%)
-AND the full-sample profit factor not lower. Run:  python research/v11_exits.py"""
+AND the full-sample profit factor not lower. Run:  python research/v14_exits.py"""
 import os, sys
 from dataclasses import replace
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
