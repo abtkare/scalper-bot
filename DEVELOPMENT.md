@@ -39,6 +39,7 @@
 | `ctrader.py` | التنفيذ على حساب cTrader التجريبي (JSON عبر WebSocket، وقف وهدف على جانب الوسيط) |
 | `watchlist.py` | قائمة المراقبة (`watchlist.json`)، قوالب كل فئة (مؤشر/عملات/معادن/رقمية) وكل استراتيجية |
 | `qualify.py` | بوابة الاختبار: سطر يتداول آلياً فقط إن ربح على تاريخه |
+| `analysis.py` | (v11) بيانات الشموع وتحليل كل سطر بالعربية للوحة — للعرض فقط |
 | `fx_hours.py` | ساعات الذهب والعملات (الأحد 17:00/18:00 → الجمعة 17:00 نيويورك، استراحة الذهب) |
 | `market_calendar.py` | عطل وأيام الإغلاق المبكر لبورصة نيويورك 2026–2027 |
 | `backtest.py` | الاختبار التاريخي بنفس المحرك |
@@ -52,7 +53,7 @@
 1. **أي تغيير في الاستراتيجية أو الإعدادات = اختبار تاريخي أولاً:** `python backtest.py --all` وقارن التدريب (60%) بالاختبار (40%). إن ساءت النتيجة خارج العيّنة فلا ترفع.
 2. **شغّل كل الاختبارات قبل الرفع:**
    ```
-   python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py && python test_watchlist.py && python test_ctrader.py && python test_structure.py && python test_news.py && python test_prices.py
+   python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py && python test_watchlist.py && python test_ctrader.py && python test_structure.py && python test_news.py && python test_prices.py && python test_quota.py && python test_ntfy.py && python test_v11.py
    ```
 3. **لا تضع أي سر في المستودع** (المفتاح، كلمة سر اللوحة، MONITOR_TOKEN، NTFY_TOPIC). هذه تُكتب فقط في إعدادات الحاوية على هوستنجر.
 4. الحارس والأزرار **تقلل المخاطرة فقط**؛ لا تضف أي طريق يفتح صفقة من خارج الاستراتيجية.

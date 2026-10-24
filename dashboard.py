@@ -218,7 +218,12 @@ h2{font-size:15px;margin:18px 0 8px}#msg{min-height:20px;font-size:13px}
 .chip{display:inline-block;padding:5px 11px;border-radius:999px;border:1px solid var(--line);font-size:12px;margin:3px 0 3px 4px;cursor:pointer}
 .chip.on{background:var(--b);color:#fff;border-color:var(--b)}
 .ni{border-top:1px solid var(--line);margin-top:8px;padding-top:8px}.ni .en{font-size:12px;color:var(--mut);direction:ltr;text-align:left}
-.ni .ar{font-size:14px;margin-top:3px}.imp2{border-right:3px solid var(--r);padding-right:7px}.imp1{border-right:3px solid var(--y);padding-right:7px}
+.ni .ar{font-size:14px;margin-top:3px}
+.chw{margin-top:8px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--bg)}
+.chw svg{display:block;width:100%;height:auto}
+.an{font-size:12.5px;margin-top:6px}.an summary{cursor:pointer;color:var(--b);font-weight:600}
+.an .row{display:flex;gap:6px;margin-top:4px}.an .row b{white-space:nowrap;min-width:84px;color:var(--mut);font-weight:500}
+.vd{margin-top:6px;padding:6px 9px;border-radius:8px;background:rgba(76,141,255,.12);font-size:13px}.imp2{border-right:3px solid var(--r);padding-right:7px}.imp1{border-right:3px solid var(--y);padding-right:7px}
 </style></head><body><div class="tk" id="tk"><div class="mut">⏳ تحميل الأسعار…</div></div><div class="w">
 <h1>بوت التداول — Paper</h1>
 <div class="mut" id="sub">جارٍ التحميل…</div>
@@ -285,19 +290,19 @@ async function load(){
   if(s.market) fl.push('<span class="badge '+(s.market.open?'ok':'warn')+'">'+esc(s.market.text)+'</span>');
   if(s.fx_market) fl.push('<span class="badge '+(s.fx_market.open?'ok':'warn')+'">'+esc(s.fx_market.text)+'</span>');
   $('flags').innerHTML=fl.join('');
-  renderWL(s);
+  LAST=s; renderWL(s);
   let h='<tr><th>الرمز</th><th>الاستراتيجية</th><th>الحالة</th><th>السعر</th><th>دخول</th><th>وقف</th><th>هدف</th><th>غير محقق</th><th>عمر السعر</th></tr>';
   for(const [k,v] of Object.entries(s.symbols||{})){const p=v.position; if(!p) continue;
-   h+='<tr><td>'+esc(k)+'</td><td>'+esc({breakout:'اختراق',scalp:'سكالبينج',pullback:'سحب',rsi2:'ارتداد RSI2'}[v.strategy]||v.strategy||'')+'</td><td>'+(p?(p.side=='long'?'شراء ':'بيع ')+p.qty:'بلا صفقة')+'</td><td>'+f(v.last_price)+'</td><td>'+(p?f(p.entry):'–')+'</td><td>'+(p?f(p.stop):'–')+'</td><td>'+(p?f(p.target):'–')+'</td><td class="'+(p&&p.unrealized<0?'neg':'pos')+'">'+(p?f(p.unrealized):'–')+'</td><td>'+(v.quote_age_s==null?'–':v.quote_age_s+' ث')+'</td></tr>';}
+   h+='<tr><td>'+esc(k)+'</td><td>'+esc({breakout:'اختراق',scalp:'سكالبينج',pullback:'سحب',rsi2:'ارتداد RSI2'}[v.strategy]||v.strategy||'')+'</td><td>'+(p?(p.side=='long'?'شراء ':'بيع ')+p.qty:'بلا صفقة')+'</td><td>'+f(v.last_price)+'</td><td>'+(p?f(p.entry):'–')+'</td><td>'+(p?f(p.stop)+(p.trail_moves?' <span class="mut">🪜'+p.trail_moves+'</span>':''):'–')+'</td><td>'+(p?(p.target==null?'<span class="mut">وقف متحرك</span>':f(p.target)):'–')+'</td><td class="'+(p&&p.unrealized<0?'neg':'pos')+'">'+(p?f(p.unrealized):'–')+'</td><td>'+(v.quote_age_s==null?'–':v.quote_age_s+' ث')+'</td></tr>';}
   $('syms').innerHTML=Object.values(s.symbols||{}).some(v=>v.position)?h:'<tr><td>لا صفقات مفتوحة</td></tr>';
   let gh=[]; if(g.peak) gh.push('قمة الرصيد: '+f(g.peak));
   for(const [k,v] of Object.entries(g.paused||{})) gh.push('موقوف '+esc(k)+' لمدة '+v+' د');
   for(const [k,v] of Object.entries(g.recent_avg_R||{})) gh.push('متوسط آخر الصفقات '+esc(k)+': '+v+'R');
   for(const e of (g.last_events||[])) gh.push('• '+esc(e));
   $('guard').innerHTML=gh.length?gh.join('<br>'):'لا تدخلات حتى الآن';
-  let t='<tr><th>الرمز</th><th>الاتجاه</th><th>السبب</th><th>الدخول</th><th>الخروج</th><th>الربح</th><th>R</th><th>وقت الخروج</th></tr>';
+  let t='<tr><th>الرمز</th><th>الاتجاه</th><th>السبب</th><th>الدخول</th><th>الخروج</th><th>الربح</th><th>R</th><th>انزلاق</th><th>وقت الخروج</th></tr>';
   for(const x of (s.recent_trades||[]).slice().reverse()){const p=parseFloat(x.pnl);
-   t+='<tr><td>'+esc(x.symbol)+'</td><td>'+esc(x.side)+'</td><td>'+esc(x.reason)+'</td><td>'+f(+x.entry)+'</td><td>'+f(+x.exit)+'</td><td class="'+(p<0?'neg':'pos')+'">'+f(p)+'</td><td>'+f(+x.R)+'</td><td>'+esc(String(x.exit_ts).slice(5,16))+'</td></tr>';}
+   t+='<tr><td>'+esc(x.symbol)+'</td><td>'+esc(x.side)+'</td><td>'+esc(x.reason)+'</td><td>'+f(+x.entry)+'</td><td>'+f(+x.exit)+'</td><td class="'+(p<0?'neg':'pos')+'">'+f(p)+'</td><td>'+f(+x.R)+'</td><td class="mut" dir="ltr">'+(x.slip_in_bps!=null?f(+x.slip_in_bps,1)+' / '+f(+x.slip_out_bps,1):'–')+'</td><td>'+esc(String(x.exit_ts).slice(5,16))+'</td></tr>';}
   $('trades').innerHTML=(s.recent_trades||[]).length?t:'<tr><td>لا صفقات مغلقة بعد</td></tr>';
   $('log').textContent=(s.log||[]).slice().reverse().join('\n');
  }catch(e){$('sub').textContent='تعذّر الاتصال بالبوت ('+e.message+')';}
@@ -324,6 +329,50 @@ function qTxt(q){ if(!q||q.n==null) return ''; let t='اختبار تاريخه:
 function stxt(x){ if(!x) return ''; const H={1:'صاعد',"-1":'هابط',0:'متذبذب'};
  return '<div style="font-size:12px;margin-top:2px">🧭 '+esc(x.text)+(x.htf!=null?' · الإطار الأكبر: '+H[x.htf]:'')+(x.swing_hi!=null?'<span class="mut" dir="ltr"> · قمة '+dp(x.swing_hi)+' / قاع '+dp(x.swing_lo)+'</span>':'')+'</div>';}
 const TKP={}; let NF='all', NEWS=null;
+let CH={}, LAST=null; const SEL={}, OPEN={};
+function slipTxt(x){ if(!x||!x.n) return ''; return '<div class="mut" style="font-size:12px">الانزلاق المقاس ('+x.n+' صفقة): دخول '+(x.in>=0?'+':'')+x.in+' · خروج '+(x.out>=0?'+':'')+x.out+' نقطة أساس'+(x.fill?' · تنفيذ الوسيط '+(x.fill>=0?'+':'')+x.fill:'')+'</div>';}
+function anTxt(id,v){ const a=v.analysis; if(!a) return '';
+ let h='<div class="vd">🎯 '+esc(a.verdict)+'</div><details class="an" '+(OPEN[id]?'open':'')+' ontoggle="OPEN[\''+esc(id)+'\']=this.open"><summary>🔎 تحليل الاستراتيجية لهذا الرمز</summary><div class="mut" style="margin-top:4px">'+esc(a.desc)+'</div>';
+ for(const [k,x] of (a.lines||[])) h+='<div class="row"><b>'+esc(k)+'</b><span>'+esc(x)+'</span></div>';
+ return h+'</details>';}
+function pickSel(t,rows){ const ids=rows.map(r=>r[0]).filter(i=>CH[i]); if(!ids.length) return null;
+ if(SEL[t]&&ids.includes(SEL[t])) return SEL[t]; const op=ids.find(i=>CH[i].pos); return op||ids[0];}
+function setSel(t,id){SEL[t]=id; if(LAST) renderWL(LAST);}
+function chartBlock(t,rows){ const sid=pickSel(t,rows); if(!sid) return '<div class="mut" style="font-size:12px;margin-top:6px">📊 الشموع تظهر بعد أول شمعة مغلقة…</div>';
+ let tabs=''; const ids=rows.map(r=>r[0]).filter(i=>CH[i]);
+ if(ids.length>1) for(const i of ids){ const v=(LAST.symbols||{})[i]||{}; tabs+='<span class="chip '+(i==sid?'on':'')+'" onclick="setSel(\''+esc(t)+'\',\''+esc(i)+'\')">'+esc((SN[v.strategy]||v.strategy)+' · '+CH[i].iv)+(CH[i].pos?' ●':'')+'</span>';}
+ return '<div style="margin-top:6px">'+tabs+'</div><div class="chw" dir="ltr">'+svgChart(CH[sid],(LAST.symbols||{})[sid])+'</div>'
+  +'<div class="mut" style="font-size:11px;margin-top:3px">🟩🟥 الشموع · ▲▼ قيعان وقمم مؤكدة · <span style="color:var(--b)">━ دخول</span> · <span style="color:var(--r)">━ وقف</span> · <span style="color:var(--g)">━ هدف</span> · ┅ مستوى إشارة الشراء/البيع</div>';}
+function hm(ts){ return new Date(ts*1000).toLocaleString('en-GB',{timeZone:'Asia/Baghdad',weekday:'short',hour:'2-digit',minute:'2-digit',hour12:false});}
+function svgChart(c,v){ const W=360,H=210,L=4,R=52,T=8,B=20, n=c.t.length; if(!n) return '';
+ const px=v&&v.last_price; let lo=Math.min(...c.l), hi=Math.max(...c.h);
+ const lv=[]; const P=c.pos; if(P){lv.push(P.entry,P.stop); if(P.target!=null) lv.push(P.target); if(P.stop0!=P.stop) lv.push(P.stop0);}
+ for(const k in (c.trig||{})) lv.push(c.trig[k]); if(px) lv.push(px);
+ const span0=hi-lo||1; for(const x of lv){ if(x>=lo-span0*0.6&&x<=hi+span0*0.6){lo=Math.min(lo,x);hi=Math.max(hi,x);} }
+ const pad=(hi-lo)*0.06||1; lo-=pad; hi+=pad;
+ const cw=(W-L-R)/n, y=x=>T+(hi-x)/(hi-lo)*(H-T-B), xs=i=>L+cw*(i+0.5);
+ let s='<svg viewBox="0 0 '+W+' '+H+'" xmlns="http://www.w3.org/2000/svg" font-size="9" font-family="system-ui,sans-serif">';
+ for(let g=0;g<=4;g++){ const yy=T+g*(H-T-B)/4, val=hi-g*(hi-lo)/4; s+='<line x1="'+L+'" x2="'+(W-R)+'" y1="'+yy+'" y2="'+yy+'" style="stroke:var(--line)" stroke-width="0.5"/><text x="'+(W-R+3)+'" y="'+(yy+3)+'" style="fill:var(--mut)">'+dp(val)+'</text>';}
+ for(let i=0;i<n;i+=Math.ceil(n/4)) s+='<text x="'+xs(i)+'" y="'+(H-6)+'" text-anchor="middle" style="fill:var(--mut)">'+hm(c.t[i])+'</text>';
+ const LC={VWAP:'var(--y)',EMA200:'#9b3df0',EMA20:'var(--y)',EMA50:'#9b3df0'};
+ for(const [nm,arr] of Object.entries(c.lines||{})){ let d=''; arr.forEach((x,i)=>{ if(x==null) return; d+=(d?'L':'M')+xs(i).toFixed(1)+' '+y(x).toFixed(1);}); s+='<path d="'+d+'" fill="none" style="stroke:'+(LC[nm]||'var(--mut)')+'" stroke-width="1" opacity="0.8"/>';}
+ const bw=Math.max(1,cw*0.62);
+ for(let i=0;i<n;i++){ const up=c.c[i]>=c.o[i], col=up?'var(--g)':'var(--r)', x=xs(i);
+  s+='<line x1="'+x+'" x2="'+x+'" y1="'+y(c.h[i])+'" y2="'+y(c.l[i])+'" style="stroke:'+col+'" stroke-width="0.8"/>';
+  const yt=y(Math.max(c.o[i],c.c[i])), yb=y(Math.min(c.o[i],c.c[i]));
+  s+='<rect x="'+(x-bw/2)+'" y="'+yt+'" width="'+bw+'" height="'+Math.max(0.8,yb-yt)+'" style="fill:'+col+'"/>';}
+ for(const [i,k,val] of (c.piv||[])){ const x=xs(i); s+=k=='H'?'<path d="M'+(x-3)+' '+(y(val)-7)+'h6l-3 4z" style="fill:var(--r)"/>':'<path d="M'+(x-3)+' '+(y(val)+7)+'h6l-3 -4z" style="fill:var(--g)"/>';}
+ const used=[]; const hl=(val,col,lab,dash,w)=>{ if(val==null||val<lo||val>hi) return ''; const yy=y(val); let ly=yy;
+  for(let k=0;k<6&&used.some(u=>Math.abs(u-ly)<12);k++) ly+=(ly>H/2?-12:12); used.push(ly);
+  return '<line x1="'+L+'" x2="'+(W-R)+'" y1="'+yy+'" y2="'+yy+'" style="stroke:'+col+'" stroke-width="'+(w||1)+'"'+(dash?' stroke-dasharray="4 3"':'')+'/><rect x="'+(W-R+1)+'" y="'+(ly-6)+'" width="'+(R-2)+'" height="12" rx="2" style="fill:'+col+'"/><text x="'+(W-R+3)+'" y="'+(ly+3)+'" fill="#fff" font-weight="600">'+lab+' '+dp(val)+'</text>';};
+ if(c.trig){ if(c.trig.long!=null) s+=hl(c.trig.long,'var(--g)','B',true,0.8); if(c.trig.short!=null) s+=hl(c.trig.short,'var(--r)','S',true,0.8);}
+ if(P){ if(P.stop0!=P.stop) s+='<line x1="'+L+'" x2="'+(W-R)+'" y1="'+y(P.stop0)+'" y2="'+y(P.stop0)+'" style="stroke:var(--r)" stroke-width="0.6" stroke-dasharray="2 3" opacity="0.6"/>';
+  s+=hl(P.entry,'var(--b)','E',false,1.2)+hl(P.stop,'var(--r)','SL',false,1.2)+(P.target!=null?hl(P.target,'var(--g)','TP',false,1.2):'');
+  let ei=c.t.findIndex(t=>t>=P.t); if(ei<0) ei=n-1; const ex=xs(ei), ey=y(P.entry);
+  s+=P.side==1?'<path d="M'+ex+' '+(ey+4)+'l-5 9h10z" style="fill:var(--b)"/>':'<path d="M'+ex+' '+(ey-4)+'l-5 -9h10z" style="fill:var(--b)"/>';}
+ if(px) s+=hl(px,'#5b6475','',false,0.6);
+ return s+'</svg>';}
+
 function age(s){return s<120?'لحظي':s<3600?'متأخر '+Math.round(s/60)+' د':'السوق مغلق';}
 async function loadTicker(){ try{ const r=await fetch('api/ticker',{cache:'no-store'}); if(!r.ok) return; const t=await r.json();
  let h=''; for(const i of (t.items||[])){ const old=TKP[i.key]; const fl=old==null||old===i.price?'':(i.price>old?'fu':'fd'); TKP[i.key]=i.price;
@@ -353,12 +402,13 @@ function renderWL(s){ const by={}; for(const [id,v] of Object.entries(s.symbols|
  let h='';
  for(const t of keys){ const rows=by[t]; const v0=rows[0][1]; const px=(v0.plan&&v0.plan.price)||v0.last_price;
   h+='<div class="c" style="margin-top:8px"><div style="display:flex;justify-content:space-between;align-items:center"><div><b dir="ltr">'+esc(t)+'</b> <span class="mut">'+esc(CN[v0.class]||v0.class||'')+' · '+dp(px)+'</span></div>'
-   +'<button class="bs" style="padding:6px 10px;font-size:12px" onclick="wl(\'remove\',{symbol:\''+esc(t)+'\'},\'حذف '+esc(t)+' من المراقبة؟\')">✕ حذف</button></div>';
+   +'<button class="bs" style="padding:6px 10px;font-size:12px" onclick="wl(\'remove\',{symbol:\''+esc(t)+'\'},\'حذف '+esc(t)+' من المراقبة؟\')">✕ حذف</button></div>'
+   +chartBlock(t,rows);
   for(const [id,v] of rows){ const p=v.plan||{};
    h+='<div style="border-top:1px solid var(--line);margin-top:8px;padding-top:8px"><div style="display:flex;justify-content:space-between;gap:6px;flex-wrap:wrap"><div><b>'+esc(SN[v.strategy]||v.strategy)+'</b> <span class="mut">'+esc(v.interval||'')+(v.win_bg?' · الدخول '+esc(v.win_bg)+' بغداد':'')+'</span></div><div>'+stTxt(v)+'</div></div>'
     +'<div style="margin-top:4px">'+sideTxt(p.long,true)+'</div>'+(v.allow_short?'<div style="margin-top:4px">'+sideTxt(p.short,false)+'</div>':'')
     +(p.note?'<div class="mut" style="font-size:12px">'+esc(p.note)+'</div>':'')+stxt(p.structure)+(p.bar?'<div class="mut" style="font-size:11px">آخر شمعة: '+esc(String(p.bar).slice(5,16))+'</div>':'<div class="mut" style="font-size:12px">بانتظار أول بيانات…</div>')
-    +fwTxt(v.fw)+(v.auto_off?'<div class="mut" style="font-size:12px">'+esc(v.auto_off)+'</div>':'')+qTxt(v.qual)
+    +anTxt(id,v)+slipTxt(v.slip)+fwTxt(v.fw)+(v.auto_off?'<div class="mut" style="font-size:12px">'+esc(v.auto_off)+'</div>':'')+qTxt(v.qual)
     +'<button class="'+(v.disabled||v.auto_off?'br':'bs')+'" style="padding:6px 10px;font-size:12px;margin-top:6px" onclick="wl(\''+(v.disabled||v.auto_off?'on':'off')+'\',{id:\''+esc(id)+'\'},null)">'+(v.disabled||v.auto_off?'▶ تفعيل التداول الآلي':'⏸ إيقاف التداول الآلي لهذا السطر')+'</button></div>';}
   h+='</div>';}
  $('wl').innerHTML=h||'<div class="c">القائمة فارغة</div>';
@@ -369,5 +419,6 @@ async function wl(action,body,q){ if(q&&!confirm(q)) return; body.action=action;
 function addSym(){ const sym=$('nsym').value.trim().toUpperCase(); if(!sym){alert('اكتب الرمز');return;}
  const st=['scalp','rsi2','breakout'].filter(x=>$('st_'+x).checked); if(!st.length){alert('اختر استراتيجية واحدة على الأقل');return;}
  wl('add',{symbol:sym,'class':$('ncls').value,strategies:st},'إضافة '+sym+'؟ (يعيد البوت التشغيل)'); }
-load(); setInterval(load,5000); loadTicker(); setInterval(loadTicker,3000); loadNews(); setInterval(loadNews,60000);
+async function loadCharts(){ try{ const r=await fetch('api/charts',{cache:'no-store'}); if(!r.ok) return; CH=await r.json(); if(LAST) renderWL(LAST);}catch(e){} }
+load(); setInterval(load,5000); loadCharts(); setInterval(loadCharts,15000); loadTicker(); setInterval(loadTicker,3000); loadNews(); setInterval(loadNews,60000);
 </script></body></html>"""

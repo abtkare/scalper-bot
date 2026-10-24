@@ -22,6 +22,7 @@ import fx_hours
 import market_calendar as cal
 from engine import Account, SymbolEngine
 from strategy import add_indicators, signals
+import structure
 
 
 def resample_bars(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
@@ -52,10 +53,17 @@ def load_history(scfg: SymbolCfg):
     return df
 
 
-def run_backtest(df: pd.DataFrame, scfg: SymbolCfg, p: Params, equity0: float):
+def run_backtest(df: pd.DataFrame, scfg: SymbolCfg, p: Params, equity0: float, slip_bps: float = None):
+    """slip_bps: adverse slippage on every MARKET fill (entries, stops, eod) on top of cost_bps.
+    None = Params.bt_slip_bps (the qualification gate and backtest.py use the same value)."""
     d = signals(add_indicators(df, p), p, scfg)
     acct = Account(equity0, p)
     eng = SymbolEngine(scfg, p, acct)
+    eng.slip_bps = p.bt_slip_bps if slip_bps is None else slip_bps
+    sw_lo = sw_hi = None
+    if scfg.trail == "swing":
+        st = structure.analyze(d, scfg.swing_k)
+        sw_lo, sw_hi = st["swing_lo"].values, st["swing_hi"].values
 
     o, h, l, c = (d[k].values for k in ("open", "high", "low", "close"))
     side, atr = d["side"].values, d["atr"].values
@@ -71,7 +79,7 @@ def run_backtest(df: pd.DataFrame, scfg: SymbolCfg, p: Params, equity0: float):
         ts, day = idx[i], idx[i].date()
         # Enter only if the previous bar is really the immediately preceding one.
         if i > 0 and side[i - 1] != 0 and (ts - idx[i - 1]) <= max_gap:
-            eng.try_enter(ts, o[i], int(side[i - 1]), float(atr[i - 1]), day)
+            eng.try_enter(ts, o[i], int(side[i - 1]), float(atr[i - 1]), day, planned=float(c[i - 1]))
         last_of_day = False
         if scfg.flatten_eod and scfg.kind == "fx":
             last_of_day = (ts + itv).strftime("%H:%M") >= scfg.eod_time     # daily flat (live: 16:45 tick)
@@ -84,6 +92,8 @@ def run_backtest(df: pd.DataFrame, scfg: SymbolCfg, p: Params, equity0: float):
         tr = eng.on_bar_close(ts, o[i], h[i], l[i], c[i], day, last_of_day)
         if tr:
             trades.append(tr)
+        elif sw_lo is not None and eng.pos is not None:
+            eng.trail_update(sw_lo[i], sw_hi[i], float(atr[i]), float(c[i]))     # bar i closed -> next bar
 
     if eng.pos is not None:
         tr = eng.force_close(idx[-1], c[-1], "end_of_data")
@@ -125,6 +135,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("symbol", nargs="?", help="e.g. QQQ or BTC/USD")
     ap.add_argument("--all", action="store_true")
+    ap.add_argument("--slip", type=float, default=None, help="extra adverse slippage per market fill, bps")
+    ap.add_argument("--slip", type=float, default=None, help="extra adverse slippage per market fill, bps")
     ap.add_argument("--mode", choices=("all", "fx", "qqq", "breakout", "scalp", "both"),
                     help="test the symbols of one trading mode")
     args = ap.parse_args()
@@ -144,7 +156,7 @@ def main() -> None:
             path = csv_path(scfg.ticker, scfg.interval)
             print(f"[{scfg.symbol}] missing {path} -> run: python data.py download {scfg.ticker} {scfg.interval} 10000")
             continue
-        trades, acct = run_backtest(df, scfg, p, p.initial_equity)
+        trades, acct = run_backtest(df, scfg, p, p.initial_equity, slip_bps=args.slip)
         print(f"\n######## {scfg.symbol}  strategy={scfg.strategy}  bars={len(df)}  {df.index[0]} -> {df.index[-1]}")
         show("ALL DATA", summarize(trades, p.initial_equity))
 

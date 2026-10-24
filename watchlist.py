@@ -80,7 +80,21 @@ def stream_id(symbol: str, strategy: str, cls: str) -> str:
     return f"{symbol}-{ {'scalp': 'SCALP', 'rsi2': 'RSI2', 'breakout': 'BRK'}[strategy] }".replace(" ", "")
 
 
+# v11 (RESEARCH.md section 15): exits behind confirmed swings, adopted only where they beat the fixed exit in
+# BOTH halves of the history and stayed better with 0.25-1 bps extra slippage.
+EXIT_OVERRIDES: Dict[str, dict] = {
+    "XAU/USD:rsi2": dict(trail="swing", trail_after_r=0.5, trail_no_target=True),   # +0.34R -> +0.49R
+    "EUR/USD:rsi2": dict(trail="swing", trail_after_r=0.5),                          # +0.14R -> +0.18R
+}
+
+
 def make_cfg(symbol: str, cls: str, strategy: str) -> SymbolCfg:
+    cfg = _make_cfg(symbol, cls, strategy)
+    ov = EXIT_OVERRIDES.get(f"{symbol.upper().strip()}:{strategy}")
+    return replace(cfg, **ov) if ov else cfg
+
+
+def _make_cfg(symbol: str, cls: str, strategy: str) -> SymbolCfg:
     symbol = symbol.upper().strip()
     if cls not in CLASSES:
         raise ConfigError(f"{symbol}: unknown class {cls!r}")

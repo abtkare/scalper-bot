@@ -30,6 +30,10 @@ class Position:
     opened_epoch: float = 0.0    # wall-clock time of the fill (live bot)
     monitor_gap: bool = False    # True if live prices were unavailable for a while (enables wick backstop)
     client_id: str = ""
+    stop0: float = 0.0           # initial stop (v11: the live stop may trail behind confirmed swings)
+    planned: float = 0.0         # price the strategy planned to enter at (signal close) -> entry slippage
+    trail_moves: int = 0         # how many times the stop was moved behind a new swing
+    order_px: float = 0.0        # live price when the order was sent -> broker fill slippage
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -44,7 +48,10 @@ class Position:
         d["side"] = int(d["side"])
         for k in ("qty", "entry", "stop", "target", "risk_amt"):
             d[k] = float(d[k])
-        return cls(**d)
+        pos = cls(**d)
+        if not pos.stop0:
+            pos.stop0 = pos.stop
+        return pos
 
 
 @dataclass
@@ -87,6 +94,9 @@ class Account:
         return True
 
 
+NO_TARGET_MULT = 20.0
+
+
 def _ok(x) -> bool:
     return x is not None and math.isfinite(x) and x > 0
 
@@ -97,6 +107,7 @@ class SymbolEngine:
         self.p = p
         self.acct = account
         self.pos: Optional[Position] = None
+        self.slip_bps = 0.0          # BACKTEST ONLY: adverse slippage on market fills (entries, stops, eod)
 
     # ---- helpers -------------------------------------------------------
     def in_window(self, ts: pd.Timestamp) -> bool:
@@ -132,7 +143,10 @@ class SymbolEngine:
             qty = math.floor(qty * 1e6) / 1e6
         if not _ok(qty):
             return None
-        return EntryPlan(side, qty, stop_dist, target_atr * atr, qty * stop_dist * conv, ts, price)
+        tgt = target_atr * atr
+        if self.scfg.trail == "swing" and self.scfg.trail_no_target:
+            tgt *= NO_TARGET_MULT        # "no target": a far safety target, the trailing stop takes the profit
+        return EntryPlan(side, qty, stop_dist, tgt, qty * stop_dist * conv, ts, price)
 
     def open_position(self, plan: EntryPlan, fill_price: float, opened_epoch: float = 0.0,
                       client_id: str = "") -> Position:
@@ -146,14 +160,49 @@ class SymbolEngine:
             target=fill_price + plan.side * plan.target_dist,
             entry_ts=plan.ts, risk_amt=plan.risk_amt,
             opened_epoch=opened_epoch, client_id=client_id,
+            stop0=fill_price - plan.side * plan.stop_dist, planned=plan.ref_price,
         )
         self.acct.trades_today += 1
         return self.pos
 
-    def try_enter(self, ts: pd.Timestamp, price: float, side: int, atr: float, day) -> Optional[Position]:
-        """Backtest path: called at the START of a bar (price = that bar's open) with the previous bar's signal."""
+    def try_enter(self, ts: pd.Timestamp, price: float, side: int, atr: float, day,
+                  planned: float = 0.0) -> Optional[Position]:
+        """Backtest path: called at the START of a bar (price = that bar's open) with the previous bar's signal.
+        A market entry is filled `slip_bps` WORSE than the open (realistic, see RESEARCH.md section 15)."""
         plan = self.plan_entry(ts, price, side, atr, day)
-        return self.open_position(plan, price) if plan else None
+        if not plan:
+            return None
+        pos = self.open_position(plan, price * (1.0 + side * self.slip_bps / 1e4))
+        pos.planned = planned or price
+        return pos
+
+    # ---- trailing stop behind confirmed swings (v11) --------------------
+    def trail_update(self, swing_lo: float, swing_hi: float, atr: float, close: float) -> bool:
+        """After a bar CLOSES: move the stop behind the last confirmed swing low (long) / high (short),
+        only in the profitable direction and only once the trade is `trail_after_r` R in profit.
+        Returns True if the stop moved. Never widens the stop."""
+        pos, cfg = self.pos, self.scfg
+        if pos is None or cfg.trail != "swing" or not _ok(atr) or not _ok(close):
+            return False
+        risk = abs(pos.entry - (pos.stop0 or pos.stop))
+        if risk <= 0 or pos.side * (close - pos.entry) < cfg.trail_after_r * risk:
+            return False
+        buf = cfg.trail_buf_atr * atr
+        if pos.side == 1:
+            if not (swing_lo is not None and math.isfinite(swing_lo)):
+                return False
+            new = swing_lo - buf
+            if new > pos.stop and new < close:
+                pos.stop, pos.trail_moves = new, pos.trail_moves + 1
+                return True
+        else:
+            if not (swing_hi is not None and math.isfinite(swing_hi)):
+                return False
+            new = swing_hi + buf
+            if new < pos.stop and new > close:
+                pos.stop, pos.trail_moves = new, pos.trail_moves + 1
+                return True
+        return False
 
     # ---- exit signals (pure: they do not change state) ------------------
     def check_tick(self, bid: float, ask: float, last: Optional[float] = None) -> Optional[Tuple[str, float]]:
@@ -209,7 +258,12 @@ class SymbolEngine:
         self.acct.roll_day(day)
         gap_open = o if (self.pos is not None and ts > self.pos.entry_ts) else None
         sig = self.bar_exit_signal(h, l, c, last_of_day, wicks, gap_open)
-        return self._close(ts, sig[1], sig[0]) if sig else None
+        if not sig:
+            return None
+        px = sig[1]
+        if sig[0] != "target" and self.slip_bps and self.pos is not None:
+            px = px * (1.0 - self.pos.side * self.slip_bps / 1e4)      # market exit: filled a bit worse
+        return self._close(ts, px, sig[0])
 
     def force_close(self, ts, price, reason="forced") -> Optional[dict]:
         return self._close(ts, price, reason) if self.pos else None
@@ -226,6 +280,13 @@ class SymbolEngine:
         gross = pos.side * (exit_price - pos.entry) * pos.qty * conv
         cost = (pos.entry + exit_price) * pos.qty * self.scfg.cost_bps / 1e4 * conv
         pnl = gross - cost
+        # slippage in bps, positive = worse than planned (entry: vs the signal close; exit: vs the stop/target)
+        want_x = pos.stop if reason.startswith(("stop", "trail")) else pos.target if reason.startswith("target") else exit_price
+        slip_in = pos.side * (pos.entry - pos.planned) / pos.planned * 1e4 if pos.planned else 0.0
+        slip_out = pos.side * (want_x - exit_price) / want_x * 1e4 if want_x else 0.0
+        slip_fill = pos.side * (pos.entry - pos.order_px) / pos.order_px * 1e4 if pos.order_px else 0.0
+        if reason.startswith("stop") and pos.trail_moves:
+            reason = "trail" + reason[4:]                 # the stop that hit had been moved behind a swing
         self.acct.equity += pnl
         self.acct.consec_losses = self.acct.consec_losses + 1 if pnl < 0 else 0
         trade = {
@@ -236,6 +297,8 @@ class SymbolEngine:
             "pnl_gross": gross, "cost": cost, "pnl": pnl,
             "R": pnl / pos.risk_amt if pos.risk_amt else 0.0,
             "reason": reason, "equity_after": self.acct.equity,
+            "slip_in_bps": round(slip_in, 2), "slip_out_bps": round(slip_out, 2), "slip_fill_bps": round(slip_fill, 2),
+            "trail_moves": pos.trail_moves, "stop0": pos.stop0,
         }
         self.pos = None
         return trade

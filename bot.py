@@ -50,6 +50,8 @@ from infra import Notifier, SingleInstance, StateStore, sd_notify, setup_logging
 from providers import ProviderError, Quote, QuoteFilter, make_providers
 import qualify
 from strategy import add_indicators, plan_levels, signals
+import analysis
+import structure
 
 STATE_FILE = "state.json"
 TRADES_FILE = "trades_live.csv"
@@ -57,7 +59,8 @@ STOP_FILE = "STOP"
 FLATTEN_FILE = "FLATTEN"
 STATUS_FILE = "status.json"
 TRADE_FIELDS = ["symbol", "side", "entry_ts", "exit_ts", "entry", "exit", "qty", "pnl_gross", "cost",
-                "pnl", "R", "reason", "equity_after"]
+                "pnl", "R", "reason", "equity_after", "slip_in_bps", "slip_out_bps", "slip_fill_bps", "trail_moves",
+                "stop0"]
 log = logging.getLogger("bot")
 
 
@@ -116,6 +119,9 @@ class SymState:
         self.fw = {"n": 0, "w": 0, "sumR": 0.0, "pnl": 0.0}  # forward (paper) results since v7
         self.auto_off = ""                                 # reason if the forward kill-switch turned it off
         self.flat_min = 16 * 60 - (int(cfg.eod_time[:2]) * 60 + int(cfg.eod_time[3:]))   # 5 for "15:55"
+        self.chart: Optional[dict] = None                  # last closed candles + overlays (dashboard)
+        self.analysis: Optional[dict] = None               # plain-Arabic reading (dashboard)
+        self.slip = {"n": 0, "in": 0.0, "out": 0.0, "fill": 0.0}   # measured slippage, bps sums (v11)
 
 
 # ---------------------------------------------------------------- the bot
@@ -221,6 +227,7 @@ class Runtime:
                     "qual": s.qual,
                     "fw": s.fw,
                     "auto_off": s.auto_off,
+                    "slip": s.slip,
                 } for s in self.syms
             },
         }
@@ -260,6 +267,8 @@ class Runtime:
             if isinstance(d.get("fw"), dict):
                 ss.fw.update({k: d["fw"][k] for k in ss.fw if k in d["fw"]})
             ss.auto_off = str(d.get("auto_off") or "")
+            if isinstance(d.get("slip"), dict):
+                ss.slip.update({k: d["slip"][k] for k in ss.slip if k in d["slip"]})
         log.info("state restored: equity=%.2f open=%s", a.equity,
                  [s.cfg.symbol for s in self.syms if s.eng.pos])
 
@@ -616,6 +625,12 @@ class Runtime:
         if tr is None:
             return
         self._log_trade(tr)
+        try:
+            ss.slip["n"] += 1
+            for k, f in (("in", "slip_in_bps"), ("out", "slip_out_bps"), ("fill", "slip_fill_bps")):
+                ss.slip[k] = round(ss.slip[k] + float(tr.get(f) or 0.0), 3)
+        except (TypeError, ValueError):
+            pass
         self.recent_trades = (self.recent_trades + [{k: str(v) for k, v in tr.items()}])[-20:]
         try:
             self.guard.on_trade(tr["symbol"], float(tr["R"]), self.acct.equity, now)
@@ -681,8 +696,52 @@ class Runtime:
             ss.plan = {"note": f"plan error: {type(e).__name__}"}
         side, atr, close = int(d["side"].iloc[-1]), float(d["atr"].iloc[-1]), float(d["close"].iloc[-1])
         ss.atr = atr if math.isfinite(atr) and atr > 0 else ss.atr
+        if eng.pos is not None and cfg.trail and last_ts >= eng.pos.entry_ts:
+            self._trail(ss, d, atr, close, now)
+        try:                                                   # dashboard only - never blocks trading
+            ss.chart = analysis.chart(d, cfg)
+            p_ = eng.pos
+            ss.analysis = analysis.analyze(d, ss.plan, cfg, None if p_ is None else
+                                           {"side": "long" if p_.side == 1 else "short", "stop": p_.stop})
+        except Exception as e:
+            log.warning("%s: chart/analysis failed: %s", cfg.symbol, e)
         if side != 0:
             self._create_pending(ss, side, atr, close, last_ts, now)
+
+    def _trail(self, ss: SymState, d: pd.DataFrame, atr: float, close: float, now: float) -> None:
+        """v11: after a bar closes, move the stop behind the last confirmed swing (never wider). The tick loop
+        then exits at the new stop. On cTrader the server-side stop stays at the original level as a backstop."""
+        try:
+            r = structure.analyze(d.iloc[-300:], ss.cfg.swing_k).iloc[-1]
+            old = ss.eng.pos.stop
+            if ss.eng.trail_update(float(r["swing_lo"]), float(r["swing_hi"]), atr, close):
+                self._save(now, force=True)
+                self.n.send(f"TRAIL {ss.cfg.symbol}: stop {old:.5g} -> {ss.eng.pos.stop:.5g} (behind the last "
+                            f"confirmed {'low' if ss.eng.pos.side == 1 else 'high'})")
+        except Exception as e:                                 # a trailing bug must never touch the position
+            log.warning("%s: trail failed: %s", ss.cfg.symbol, e)
+
+    def charts(self) -> dict:
+        """/api/charts: candles + overlays per stream, with the open position (dashboard only)."""
+        out = {}
+        for ss in self.syms:
+            if ss.chart is None:
+                continue
+            c = dict(ss.chart)
+            p_ = ss.eng.pos
+            if p_ is not None:
+                c["pos"] = {"side": p_.side, "entry": p_.entry, "stop": p_.stop, "stop0": p_.stop0 or p_.stop,
+                            "target": None if self._no_target(ss) else p_.target,
+                            "t": analysis.epochs([p_.entry_ts], ss.cfg.tz)[0]}
+            pl = ss.plan or {}
+            c["trig"] = {k: pl[k]["trigger"] for k in ("long", "short") if pl.get(k)}
+            c["ticker"] = ss.cfg.ticker
+            out[ss.cfg.symbol] = c
+        return out
+
+    @staticmethod
+    def _no_target(ss: SymState) -> bool:
+        return bool(ss.cfg.trail == "swing" and ss.cfg.trail_no_target)
 
     def _create_pending(self, ss: SymState, side: int, atr: float, close: float,
                         signal_ts: pd.Timestamp, now: float) -> None:
@@ -752,6 +811,7 @@ class Runtime:
             if fill.reason:
                 self.n.send(f"{sym}: {fill.reason}")
         pos = ss.eng.open_position(plan, fill.price, opened_epoch=now, client_id=cid)
+        pos.planned, pos.order_px = pd_.ref_close, px         # slippage: vs the signal close / vs the order price
         self._save(now, force=True)                            # position on disk BEFORE anything else
         self.n.send(f"ENTRY {sym} {'LONG' if pos.side == 1 else 'SHORT'} qty={pos.qty} @ {pos.entry:.4f} "
                     f"stop={pos.stop:.4f} target={pos.target:.4f} (filled {now - pd_.nominal:.1f}s after bar open)")
@@ -826,11 +886,15 @@ class Runtime:
                 "strategy": ss.cfg.strategy, "ticker": ss.cfg.ticker, "interval": ss.cfg.interval,
                 "class": self.classes.get(ss.cfg.symbol, ss.cfg.kind),
                 "trading": self._trading(ss), "disabled": ss.disabled, "qual": ss.qual, "plan": ss.plan,
-                "fw": ss.fw, "auto_off": ss.auto_off,
+                "fw": ss.fw, "auto_off": ss.auto_off, "analysis": ss.analysis,
+                "slip": None if not ss.slip["n"] else {k: round(ss.slip[k] / ss.slip["n"], 2) for k in ("in", "out", "fill")}
+                        | {"n": ss.slip["n"]},
+                "trail": ss.cfg.trail, "no_target": self._no_target(ss),
                 "windows": ss.cfg.windows, "win_bg": self._win_bg(ss, now), "allow_short": ss.cfg.allow_short,
                 "position": None if p_ is None else {
                     "side": "long" if p_.side == 1 else "short", "qty": p_.qty, "entry": p_.entry,
-                    "stop": p_.stop, "target": p_.target,
+                    "stop": p_.stop, "target": None if self._no_target(ss) else p_.target,
+                    "stop0": p_.stop0 or p_.stop, "trail_moves": p_.trail_moves,
                     "unrealized": None if q is None else round(
                         p_.side * (q.mid - p_.entry) * p_.qty * ss.cfg.usd_per_quote(q.mid), 2)},
                 "last_price": None if q is None else q.mid,
@@ -1088,7 +1152,8 @@ def main() -> None:
                   tail=LOG_TAIL, port=int(os.getenv("PORT")), restart_fn=lambda: rt.stopping.set(),
                   watch_fn=_watch,
                   feeds={"/api/ticker": lambda: rt.prices.board() if rt.prices is not None else {"items": []},
-                         "/api/news": lambda: rt.news.snapshot() if rt.news is not None else None}).start()
+                         "/api/news": lambda: rt.news.snapshot() if rt.news is not None else None,
+                         "/api/charts": rt.charts}).start()
 
     if os.getenv("NEWS_WATCH", "1") != "0":                  # Truth Social window - alerts only, never trades
         try:

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import List, Tuple
 from zoneinfo import ZoneInfo
 
@@ -50,6 +50,9 @@ class Params:
     target_atr: float = 1.5          # target distance = target_atr * ATR
     # Skip setups whose target is not at least N x the round-trip cost.
     min_target_cost_multiple: float = 3.0
+    # v11: adverse slippage (bps) added to every MARKET fill in the backtest and the qualification gate,
+    # on top of cost_bps. Live fills record their real slippage (trades_live.csv slip_in_bps / slip_out_bps).
+    bt_slip_bps: float = 0.25
 
     # --- speed (live loop) ---
     loop_sec: float = 0.2            # main loop period; exits are evaluated on every quote
@@ -95,6 +98,13 @@ class SymbolCfg:
     exit_only: bool = False          # set automatically for a leftover position of a mode that is switched off
     stop_atr: float = 0.0            # per-symbol overrides (0 = use Params.stop_atr / target_atr)
     target_atr: float = 0.0
+    # v11 exits from market structure (RESEARCH.md section 15). trail="swing": after each CLOSED bar the stop
+    # moves behind the last confirmed swing low (long) / high (short), never wider, once trail_after_r R ahead.
+    trail: str = ""
+    trail_after_r: float = 0.5
+    trail_buf_atr: float = 0.1
+    trail_no_target: bool = False    # True: no fixed target, the trailing stop takes the profit
+    swing_k: int = 3                 # bars on each side that confirm a swing high/low
 
     @property
     def file_stub(self) -> str:
@@ -165,8 +175,8 @@ def _fx(sym: str, cost: float) -> SymbolCfg:
     )
 
 
-GOLD = _fx("XAU/USD", 0.5)
-EURUSD = _fx("EUR/USD", 0.5)
+GOLD = replace(_fx("XAU/USD", 0.5), trail="swing", trail_after_r=0.5, trail_no_target=True)   # v11
+EURUSD = replace(_fx("EUR/USD", 0.5), trail="swing", trail_after_r=0.5)                         # v11
 GBPUSD = _fx("GBP/USD", 0.6)
 USDJPY = _fx("USD/JPY", 0.5)
 FX_SET = [GOLD, EURUSD, GBPUSD, USDJPY]
@@ -294,6 +304,8 @@ def validate_config(p: Params, symbols: List[SymbolCfg]) -> None:
         need(150 <= s.history_bars <= 5000, f"{s.symbol}: history_bars must be in [150, 5000]")
         need(s.donchian_n >= 2, f"{s.symbol}: donchian_n must be >= 2")
         need(s.stop_atr >= 0 and s.target_atr >= 0, f"{s.symbol}: stop_atr/target_atr must be >= 0")
+        need(s.trail in ("", "swing"), f"{s.symbol}: trail must be '' or 'swing'")
+        need(2 <= s.swing_k <= 6 and s.trail_after_r >= 0 and s.trail_buf_atr >= 0, f"{s.symbol}: bad trail settings")
         need(_HHMM.match(s.eod_time) is not None, f"{s.symbol}: eod_time must be HH:MM")
         for a, b in s.windows:
             need(_HHMM.match(a) and _HHMM.match(b) and a <= b, f"{s.symbol}: bad window {(a, b)}")
