@@ -118,8 +118,10 @@ class SymbolEngine:
         return any(a <= hhmm <= b for a, b in w)
 
     # ---- entry ---------------------------------------------------------
-    def plan_entry(self, ts: pd.Timestamp, price: float, side: int, atr: float, day) -> Optional[EntryPlan]:
-        """All entry rules + position sizing. Does not open anything."""
+    def plan_entry(self, ts: pd.Timestamp, price: float, side: int, atr: float, day,
+                   stop_dist: Optional[float] = None, target_dist: Optional[float] = None) -> Optional[EntryPlan]:
+        """All entry rules + position sizing. Does not open anything.
+        stop_dist / target_dist: per-signal distances (zone strategy); default = stop_atr / target_atr x ATR."""
         self.acct.roll_day(day)
         if self.pos is not None or side == 0 or not _ok(atr) or not _ok(price):
             return None
@@ -131,7 +133,7 @@ class SymbolEngine:
         p = self.p
         stop_atr = self.scfg.stop_atr or p.stop_atr
         target_atr = self.scfg.target_atr or p.target_atr
-        stop_dist = stop_atr * atr
+        stop_dist = stop_dist if _ok(stop_dist) else stop_atr * atr
         conv = self.scfg.usd_per_quote(price)          # quote currency -> USD (USD/JPY: 1/price)
         qty = self.acct.equity * p.risk_pct / (stop_dist * conv)
         qty = min(qty, self.acct.equity * p.max_leverage / (price * conv))
@@ -143,7 +145,7 @@ class SymbolEngine:
             qty = math.floor(qty * 1e6) / 1e6
         if not _ok(qty):
             return None
-        tgt = target_atr * atr
+        tgt = target_dist if _ok(target_dist) else target_atr * atr
         if self.scfg.trail == "swing" and self.scfg.trail_no_target:
             tgt *= NO_TARGET_MULT        # "no target": a far safety target, the trailing stop takes the profit
         return EntryPlan(side, qty, stop_dist, tgt, qty * stop_dist * conv, ts, price)
@@ -166,10 +168,11 @@ class SymbolEngine:
         return self.pos
 
     def try_enter(self, ts: pd.Timestamp, price: float, side: int, atr: float, day,
-                  planned: float = 0.0) -> Optional[Position]:
+                  planned: float = 0.0, stop_dist: Optional[float] = None,
+                  target_dist: Optional[float] = None) -> Optional[Position]:
         """Backtest path: called at the START of a bar (price = that bar's open) with the previous bar's signal.
         A market entry is filled `slip_bps` WORSE than the open (realistic, see RESEARCH.md section 15)."""
-        plan = self.plan_entry(ts, price, side, atr, day)
+        plan = self.plan_entry(ts, price, side, atr, day, stop_dist, target_dist)
         if not plan:
             return None
         pos = self.open_position(plan, price * (1.0 + side * self.slip_bps / 1e4))

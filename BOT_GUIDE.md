@@ -1,4 +1,4 @@
-# دليل إدارة بوت التداول — Scalper Bot (v14)
+# دليل إدارة بوت التداول — Scalper Bot (v15)
 
 > آخر تحديث: 23 أكتوبر 2026 · المستودع: https://github.com/abtkare/scalper-bot (عام — **لا أسرار فيه**)
 > هذا الملف يكفي لبدء محادثة جديدة مع Claude: أرفقه وقل "أكمل العمل على بوت التداول حسب هذا الدليل".
@@ -18,6 +18,7 @@
 | جديد v9 | قراءة هيكل السوق 🧭 لكل سطر (اتجاه، كسر/انعكاس، قمة/قاع، طول الموجة) + فلتر الإطار الأكبر لأسطر الاختراق |
 | جديد v10 | شريط أسعار حي أعلى اللوحة (ذهب، فضة، بلاتين، نحاس، نفط، دولار، عملات، دينار، بيتكوين، سندات) · نافذة أخبار مصادر القرار مترجمة للعربية · الأجندة الاقتصادية · فرامل الأحداث (وضع مراقبة `shadow`) |
 | جديد v14 | **شموع يابانية لكل رمز** في اللوحة مع خطوط الصفقة المفتوحة (دخول/وقف/هدف) والقمم والقيعان ومستويات الإشارة · **تحليل الاستراتيجية لكل رمز** (حكم + تفاصيل) · **وقف متحرك خلف القمم/القيعان** للذهب (بلا هدف ثابت) وEUR/USD · **قياس الانزلاق** لكل صفقة + إضافته لبوابة الاختبار (0.25 bps) |
+| جديد v15 | **مناطق المؤسسات** (طلب = دعم أخضر، عرض = مقاومة أحمر) مرسومة على كل الشموع ومذكورة في التحليل — للمعلومة · استراتيجية `zone` تجريبية في ➕ إضافة رمز (لم تربح في الاختبار، البوابة تمنعها) · إغلاق يومي مضمون حتى بلا سعر حي (`eod_noquote`) |
 | الخطوة القادمة | ربط حساب **cTrader التجريبي** لدى الوسيط (فايبر) — التطبيق رقم 45424 بانتظار موافقة cTrader |
 | الهدف | 3 أسابيع على الحساب التجريبي، ثم تقرير صريح وقرار التداول الحقيقي بمبلغ صغير |
 
@@ -113,7 +114,7 @@ GitHub (main)  ──عند كل تشغيل للحاوية──▶  boot.py ي�
 ### أ) عبر Claude (الطريقة المعتادة)
 1. في المحادثة الجديدة يطلب Claude صلاحية الرفع على المستودع (`abtkare/scalper-bot`) — وافق على رسالة الصلاحية إن ظهرت.
 2. Claude يعدّل الكود، يشغّل **كل الاختبارات**:
-   `python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py && python test_watchlist.py && python test_ctrader.py && python test_structure.py && python test_news.py && python test_prices.py && python test_quota.py && python test_ntfy.py && python test_v14.py`
+   `python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py && python test_watchlist.py && python test_ctrader.py && python test_structure.py && python test_news.py && python test_prices.py && python test_quota.py && python test_ntfy.py && python test_v14.py && python test_v15.py`
 3. يرفع على فرع `main`.
 4. إعادة التشغيل لتحميل الكود (أي طريقة):
    - **لوحة التحكم ← 🔄 تحديث البوت من GitHub** (الأسهل)، أو

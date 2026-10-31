@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 
 import structure
+import zones as zmod
+from dataclasses import replace as _replace
 
 CHART_BARS = 80
 
@@ -24,6 +26,9 @@ STRAT_DESC = {
     "breakout": "اختراق: يشتري عندما تغلق الشمعة فوق أعلى قمة لآخر فترة، بشرط اتجاه صاعد على الإطارين "
                 "(الحالي والأكبر). هدف أكبر من الوقف، نسبة ربح أقل وربح أكبر لكل صفقة.",
     "pullback": "سحب إلى EMA20 في اتجاه قائم.",
+    "zone": "مناطق المؤسسات (تجريبي): بعد شمعة اندفاع قوية تكسر آخر قمة/قاع، تُحدَّد آخر شمعة معاكسة قبلها "
+            "كمنطقة طلب/عرض، ويُدخل مع الاتجاه عند أول عودة للسعر إليها ورفضها. الوقف خلف المنطقة. "
+            "في الاختبار التاريخي لم تحقق ربحاً بعد التكاليف، لذلك لا تتداول إلا إذا اجتازت بوابة الاختبار.",
 }
 
 
@@ -70,7 +75,22 @@ def chart(d: pd.DataFrame, scfg, k: Optional[int] = None, n: int = CHART_BARS) -
     for col, label in names:
         if col in v.columns:
             out["lines"][label] = [_r(x) for x in v[col]]
+    # institutional demand / supply zones (v15) - drawn on every chart, informational only
+    zs = inst_zones(d, scfg)
+    out["zones"] = [[z["side"], _r(z["lo"]), _r(z["hi"]), max(0, len(v) - 1 - z["age"])] for z in zs]
     return out
+
+
+def inst_zones(d: pd.DataFrame, scfg) -> list:
+    """Live institutional zones for display. A 'zone' stream uses its own settings; any other stream the
+    research defaults (order blocks after a 1-ATR displacement that broke structure, no HTF filter)."""
+    if "zones" in d.attrs:
+        return list(d.attrs["zones"])
+    try:
+        cfg = scfg if scfg.strategy == "zone" else _replace(scfg, zone_mode="ob", htf_mult=0, zone_one_side=False)
+        return zmod.find(d.iloc[-400:], cfg)[4]
+    except Exception:
+        return []
 
 
 def _candle(row, prev, atr: float) -> str:
@@ -133,6 +153,19 @@ def analyze(d: pd.DataFrame, plan: dict, scfg, position: Optional[dict] = None) 
         cd = _candle(last, d.iloc[-2], atr)
         if cd:
             lines.append(("🕯 آخر شمعة", cd))
+    zs = inst_zones(d, scfg)
+    if zs and atr > 0:
+        dem = sorted([z for z in zs if z["side"] == 1 and z["hi"] <= c * 1.0 + atr * 3], key=lambda z: c - z["hi"])
+        sup = sorted([z for z in zs if z["side"] == -1 and z["lo"] >= c - atr * 3], key=lambda z: z["lo"] - c)
+        t = []
+        if dem:
+            z = dem[0]
+            t.append(f"طلب (دعم) {_r(z['lo'])}–{_r(z['hi'])} على بعد {(c - z['hi']) / atr:.1f} ATR")
+        if sup:
+            z = sup[0]
+            t.append(f"عرض (مقاومة) {_r(z['lo'])}–{_r(z['hi'])} على بعد {(z['lo'] - c) / atr:.1f} ATR")
+        if t:
+            lines.append(("🏦 مناطق المؤسسات", " · ".join(t) + " (للمعلومة)"))
     if getattr(scfg, "trail", ""):
         lines.append(("🪜 الخروج", "وقف متحرك خلف آخر قاع/قمة مؤكدة بعد +%gR" % scfg.trail_after_r
                       + (" بلا هدف ثابت" if scfg.trail_no_target else " مع هدف ثابت")))

@@ -105,6 +105,18 @@ class SymbolCfg:
     trail_buf_atr: float = 0.1
     trail_no_target: bool = False    # True: no fixed target, the trailing stop takes the profit
     swing_k: int = 3                 # bars on each side that confirm a swing high/low
+    # v15 "zone" strategy - institutional supply/demand zones (zones.py, RESEARCH.md section 16)
+    zone_mode: str = "ob"            # ob: order block retest | retest: broken swing retest | sweep: liquidity sweep
+    zone_disp_atr: float = 1.0       # displacement candle body (or 1.5x for a 3-bar run) in ATR
+    zone_vol_mult: float = 0.0       # >0: the run must trade >= N x average volume (only where volume exists)
+    zone_entry: str = "reject"       # reject: candle touches the zone and closes back OUT of it | touch
+    zone_tp: str = "rr"              # rr: target = zone_rr x risk | swing: the displacement high/low (min 1R)
+    zone_rr: float = 2.0
+    zone_buf_atr: float = 0.1        # stop beyond the far edge of the zone
+    zone_min_risk_atr: float = 0.3
+    zone_max_risk_atr: float = 3.0
+    zone_max_age: int = 40           # bars a zone stays valid
+    zone_one_side: bool = True       # a new zone replaces older zones of the same side (freshest footprint)
 
     @property
     def file_stub(self) -> str:
@@ -295,8 +307,11 @@ def validate_config(p: Params, symbols: List[SymbolCfg]) -> None:
         need(s.provider in PROVIDERS, f"{s.symbol}: provider must be one of {PROVIDERS}")
         need(s.quote_src in PROVIDERS, f"{s.symbol}: quote_provider must be one of {PROVIDERS}")
         need(s.poll_sec >= 0, f"{s.symbol}: poll_sec must be >= 0")
-        need(s.strategy in ("pullback", "breakout", "scalp", "rsi2"),
-             f"{s.symbol}: strategy must be 'pullback', 'breakout', 'scalp' or 'rsi2'")
+        need(s.strategy in ("pullback", "breakout", "scalp", "rsi2", "zone"),
+             f"{s.symbol}: strategy must be 'pullback', 'breakout', 'scalp', 'rsi2' or 'zone'")
+        need(s.zone_mode in ("ob", "retest", "sweep"), f"{s.symbol}: zone_mode must be ob/retest/sweep")
+        need(s.zone_entry in ("reject", "touch") and s.zone_tp in ("rr", "swing") and s.zone_rr > 0,
+             f"{s.symbol}: bad zone settings")
         need(0 < s.rsi2_th < 50, f"{s.symbol}: rsi2_th must be in (0, 50)")
         if s.kind == "fx":
             need(s.tz == "America/New_York", f"{s.symbol}: fx symbols need tz='America/New_York' (trading hours)")

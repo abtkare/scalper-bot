@@ -258,7 +258,8 @@ h2{font-size:15px;margin:18px 0 8px}#msg{min-height:20px;font-size:13px}
  <div style="margin:8px 0;display:flex;gap:14px;flex-wrap:wrap">
   <label><input type="checkbox" id="st_scalp" checked> سكالبينج (15 د)</label>
   <label><input type="checkbox" id="st_rsi2"> ارتداد RSI2 (ساعة)</label>
-  <label><input type="checkbox" id="st_breakout"> اختراق</label></div>
+  <label><input type="checkbox" id="st_breakout"> اختراق</label>
+  <label><input type="checkbox" id="st_zone"> مناطق المؤسسات (تجريبي)</label></div>
  <button class="bu" style="width:100%" onclick="addSym()">➕ إضافة إلى المراقبة</button>
  <div class="mut" style="margin-top:6px">داو جونز = DIA · ناسداك = QQQ · S&P 500 = SPY. الفضة والنفط تحتاجان خطة Twelve Data مدفوعة.</div>
  <div id="wmsg" class="mut"></div></div>
@@ -293,7 +294,7 @@ async function load(){
   LAST=s; renderWL(s);
   let h='<tr><th>الرمز</th><th>الاستراتيجية</th><th>الحالة</th><th>السعر</th><th>دخول</th><th>وقف</th><th>هدف</th><th>غير محقق</th><th>عمر السعر</th></tr>';
   for(const [k,v] of Object.entries(s.symbols||{})){const p=v.position; if(!p) continue;
-   h+='<tr><td>'+esc(k)+'</td><td>'+esc({breakout:'اختراق',scalp:'سكالبينج',pullback:'سحب',rsi2:'ارتداد RSI2'}[v.strategy]||v.strategy||'')+'</td><td>'+(p?(p.side=='long'?'شراء ':'بيع ')+p.qty:'بلا صفقة')+'</td><td>'+f(v.last_price)+'</td><td>'+(p?f(p.entry):'–')+'</td><td>'+(p?f(p.stop)+(p.trail_moves?' <span class="mut">🪜'+p.trail_moves+'</span>':''):'–')+'</td><td>'+(p?(p.target==null?'<span class="mut">وقف متحرك</span>':f(p.target)):'–')+'</td><td class="'+(p&&p.unrealized<0?'neg':'pos')+'">'+(p?f(p.unrealized):'–')+'</td><td>'+(v.quote_age_s==null?'–':v.quote_age_s+' ث')+'</td></tr>';}
+   h+='<tr><td>'+esc(k)+'</td><td>'+esc({breakout:'اختراق',scalp:'سكالبينج',pullback:'سحب',rsi2:'ارتداد RSI2',zone:'مناطق المؤسسات'}[v.strategy]||v.strategy||'')+'</td><td>'+(p?(p.side=='long'?'شراء ':'بيع ')+p.qty:'بلا صفقة')+'</td><td>'+f(v.last_price)+'</td><td>'+(p?f(p.entry):'–')+'</td><td>'+(p?f(p.stop)+(p.trail_moves?' <span class="mut">🪜'+p.trail_moves+'</span>':''):'–')+'</td><td>'+(p?(p.target==null?'<span class="mut">وقف متحرك</span>':f(p.target)):'–')+'</td><td class="'+(p&&p.unrealized<0?'neg':'pos')+'">'+(p?f(p.unrealized):'–')+'</td><td>'+(v.quote_age_s==null?'–':v.quote_age_s+' ث')+'</td></tr>';}
   $('syms').innerHTML=Object.values(s.symbols||{}).some(v=>v.position)?h:'<tr><td>لا صفقات مفتوحة</td></tr>';
   let gh=[]; if(g.peak) gh.push('قمة الرصيد: '+f(g.peak));
   for(const [k,v] of Object.entries(g.paused||{})) gh.push('موقوف '+esc(k)+' لمدة '+v+' د');
@@ -310,10 +311,11 @@ async function load(){
 async function cmd(c,q){ if(!confirm(q)) return;
  const r=await fetch('api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:c})});
  const j=await r.json().catch(()=>({})); $('msg').textContent=j.message||j.error||r.status; load(); }
-const SN={scalp:'سكالبينج',rsi2:'ارتداد RSI2',breakout:'اختراق',pullback:'سحب'};
+const SN={scalp:'سكالبينج',rsi2:'ارتداد RSI2',breakout:'اختراق',pullback:'سحب',zone:'مناطق المؤسسات'};
 const CN={etf:'مؤشر',fx:'عملات',metal:'معادن',crypto:'رقمية',stock:'مؤشر'};
 function dp(x){if(x==null)return'–';const a=Math.abs(x);return Number(x).toLocaleString('en-US',{maximumFractionDigits:a>=1000?1:a>=10?2:a>=1?4:6});}
 function sideTxt(pl,buy){ if(!pl) return '<span class="mut">'+(buy?'لا شراء الآن':'لا بيع الآن')+'</span>';
+ if(pl.zone) return '<b class="'+(buy?'pos':'neg')+'">'+(buy?'شراء':'بيع')+'</b> عند العودة إلى منطقة '+(buy?'الطلب':'العرض')+' <b dir="ltr">'+dp(pl.zone[0])+'–'+dp(pl.zone[1])+'</b> <span class="mut">('+(pl.dist_pct>0?'+':'')+pl.dist_pct+'%)</span> ثم إغلاق '+(buy?'فوقها':'تحتها')+'<br><span class="mut">وقف</span> '+dp(pl.stop)+' · <span class="mut">هدف</span> '+dp(pl.target);
  const w=buy?'شراء':'بيع', op=pl.op=='<'?'تحت':'فوق';
  return '<b class="'+(buy?'pos':'neg')+'">'+w+'</b> إذا أغلقت الشمعة '+op+' <b>'+dp(pl.trigger)+'</b> <span class="mut">('+(pl.dist_pct>0?'+':'')+pl.dist_pct+'%)</span>'+(pl.bound!=null?' <span class="mut">و'+(buy?'فوق':'تحت')+' '+dp(pl.bound)+'</span>':'')+'<br><span class="mut">وقف</span> '+dp(pl.stop)+' · <span class="mut">هدف</span> '+dp(pl.target);}
 function stTxt(v){ if(v.disabled) return '<span class="badge warn">⏸ موقوف يدوياً</span>';
@@ -342,7 +344,7 @@ function chartBlock(t,rows){ const sid=pickSel(t,rows); if(!sid) return '<div cl
  let tabs=''; const ids=rows.map(r=>r[0]).filter(i=>CH[i]);
  if(ids.length>1) for(const i of ids){ const v=(LAST.symbols||{})[i]||{}; tabs+='<span class="chip '+(i==sid?'on':'')+'" onclick="setSel(\''+esc(t)+'\',\''+esc(i)+'\')">'+esc((SN[v.strategy]||v.strategy)+' · '+CH[i].iv)+(CH[i].pos?' ●':'')+'</span>';}
  return '<div style="margin-top:6px">'+tabs+'</div><div class="chw" dir="ltr">'+svgChart(CH[sid],(LAST.symbols||{})[sid])+'</div>'
-  +'<div class="mut" style="font-size:11px;margin-top:3px">🟩🟥 الشموع · ▲▼ قيعان وقمم مؤكدة · <span style="color:var(--b)">━ دخول</span> · <span style="color:var(--r)">━ وقف</span> · <span style="color:var(--g)">━ هدف</span> · ┅ مستوى إشارة الشراء/البيع</div>';}
+  +'<div class="mut" style="font-size:11px;margin-top:3px">🟩🟥 الشموع · ▲▼ قيعان وقمم مؤكدة · <span style="color:var(--b)">━ دخول</span> · <span style="color:var(--r)">━ وقف</span> · <span style="color:var(--g)">━ هدف</span> · ┅ مستوى إشارة الشراء/البيع · <span style="color:var(--g)">▮ منطقة طلب</span> / <span style="color:var(--r)">▮ عرض</span> (مؤسسات، للمعلومة)</div>';}
 function hm(ts){ return new Date(ts*1000).toLocaleString('en-GB',{timeZone:'Asia/Baghdad',weekday:'short',hour:'2-digit',minute:'2-digit',hour12:false});}
 function svgChart(c,v){ const W=360,H=210,L=4,R=52,T=8,B=20, n=c.t.length; if(!n) return '';
  const px=v&&v.last_price; let lo=Math.min(...c.l), hi=Math.max(...c.h);
@@ -356,6 +358,8 @@ function svgChart(c,v){ const W=360,H=210,L=4,R=52,T=8,B=20, n=c.t.length; if(!n
  for(let i=0;i<n;i+=Math.ceil(n/4)) s+='<text x="'+xs(i)+'" y="'+(H-6)+'" text-anchor="middle" style="fill:var(--mut)">'+hm(c.t[i])+'</text>';
  const LC={VWAP:'var(--y)',EMA200:'#9b3df0',EMA20:'var(--y)',EMA50:'#9b3df0'};
  for(const [nm,arr] of Object.entries(c.lines||{})){ let d=''; arr.forEach((x,i)=>{ if(x==null) return; d+=(d?'L':'M')+xs(i).toFixed(1)+' '+y(x).toFixed(1);}); s+='<path d="'+d+'" fill="none" style="stroke:'+(LC[nm]||'var(--mut)')+'" stroke-width="1" opacity="0.8"/>';}
+ for(const [sd,zl,zh,zi] of (c.zones||[])){ if(zh<lo||zl>hi) continue; const y1=y(Math.min(hi,zh)), y2=y(Math.max(lo,zl));
+  s+='<rect x="'+(L+cw*zi)+'" y="'+y1+'" width="'+(W-R-L-cw*zi)+'" height="'+Math.max(1,y2-y1)+'" style="fill:'+(sd==1?'var(--g)':'var(--r)')+'" opacity="0.16"/><text x="'+(L+cw*zi+2)+'" y="'+(sd==1?y2-2:y1+8)+'" style="fill:'+(sd==1?'var(--g)':'var(--r)')+'" font-size="8">'+(sd==1?'طلب':'عرض')+'</text>';}
  const bw=Math.max(1,cw*0.62);
  for(let i=0;i<n;i++){ const up=c.c[i]>=c.o[i], col=up?'var(--g)':'var(--r)', x=xs(i);
   s+='<line x1="'+x+'" x2="'+x+'" y1="'+y(c.h[i])+'" y2="'+y(c.l[i])+'" style="stroke:'+col+'" stroke-width="0.8"/>';
@@ -417,7 +421,7 @@ async function wl(action,body,q){ if(q&&!confirm(q)) return; body.action=action;
  const r=await fetch('api/watchlist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  const j=await r.json().catch(()=>({})); $('wmsg').textContent=j.message||j.error||r.status; alert(j.message||j.error||r.status); load(); }
 function addSym(){ const sym=$('nsym').value.trim().toUpperCase(); if(!sym){alert('اكتب الرمز');return;}
- const st=['scalp','rsi2','breakout'].filter(x=>$('st_'+x).checked); if(!st.length){alert('اختر استراتيجية واحدة على الأقل');return;}
+ const st=['scalp','rsi2','breakout','zone'].filter(x=>$('st_'+x).checked); if(!st.length){alert('اختر استراتيجية واحدة على الأقل');return;}
  wl('add',{symbol:sym,'class':$('ncls').value,strategies:st},'إضافة '+sym+'؟ (يعيد البوت التشغيل)'); }
 async function loadCharts(){ try{ const r=await fetch('api/charts',{cache:'no-store'}); if(!r.ok) return; CH=await r.json(); if(LAST) renderWL(LAST);}catch(e){} }
 load(); setInterval(load,5000); loadCharts(); setInterval(loadCharts,15000); loadTicker(); setInterval(loadTicker,3000); loadNews(); setInterval(loadNews,60000);

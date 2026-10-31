@@ -67,6 +67,8 @@ def run_backtest(df: pd.DataFrame, scfg: SymbolCfg, p: Params, equity0: float, s
 
     o, h, l, c = (d[k].values for k in ("open", "high", "low", "close"))
     side, atr = d["side"].values, d["atr"].values
+    sld = d["sl_dist"].values if "sl_dist" in d.columns else None
+    tpd = d["tp_dist"].values if "tp_dist" in d.columns else None
     idx = d.index
     hhmm = idx.strftime("%H:%M")
     max_gap = timedelta(minutes=scfg.interval_minutes * 1.5)
@@ -79,7 +81,9 @@ def run_backtest(df: pd.DataFrame, scfg: SymbolCfg, p: Params, equity0: float, s
         ts, day = idx[i], idx[i].date()
         # Enter only if the previous bar is really the immediately preceding one.
         if i > 0 and side[i - 1] != 0 and (ts - idx[i - 1]) <= max_gap:
-            eng.try_enter(ts, o[i], int(side[i - 1]), float(atr[i - 1]), day, planned=float(c[i - 1]))
+            eng.try_enter(ts, o[i], int(side[i - 1]), float(atr[i - 1]), day, planned=float(c[i - 1]),
+                          stop_dist=None if sld is None else float(sld[i - 1]),
+                          target_dist=None if tpd is None else float(tpd[i - 1]))
         last_of_day = False
         if scfg.flatten_eod and scfg.kind == "fx":
             last_of_day = (ts + itv).strftime("%H:%M") >= scfg.eod_time     # daily flat (live: 16:45 tick)

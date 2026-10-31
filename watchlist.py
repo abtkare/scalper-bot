@@ -28,8 +28,8 @@ from config import ConfigError, SymbolCfg
 
 WATCHLIST_FILE = "watchlist.json"
 CLASSES = ("etf", "fx", "metal", "crypto")
-STRATEGIES = ("scalp", "rsi2", "breakout")
-STRAT_AR = {"scalp": "سكالبينج", "rsi2": "ارتداد RSI2", "breakout": "اختراق"}
+STRATEGIES = ("scalp", "rsi2", "breakout", "zone")
+STRAT_AR = {"scalp": "سكالبينج", "rsi2": "ارتداد RSI2", "breakout": "اختراق", "zone": "مناطق المؤسسات"}
 CLASS_AR = {"etf": "مؤشر / صندوق", "fx": "عملات", "metal": "معادن", "crypto": "عملة رقمية"}
 
 DEFAULT: List[dict] = [
@@ -77,7 +77,7 @@ def stream_id(symbol: str, strategy: str, cls: str) -> str:
         return "QQQ-SCALP"
     if cls in ("fx", "metal") and strategy == "rsi2":
         return symbol
-    return f"{symbol}-{ {'scalp': 'SCALP', 'rsi2': 'RSI2', 'breakout': 'BRK'}[strategy] }".replace(" ", "")
+    return f"{symbol}-{ {'scalp': 'SCALP', 'rsi2': 'RSI2', 'breakout': 'BRK', 'zone': 'ZONE'}[strategy] }".replace(" ", "")
 
 
 # v14 (RESEARCH.md section 15): exits behind confirmed swings, adopted only where they beat the fixed exit in
@@ -103,6 +103,18 @@ def _make_cfg(symbol: str, cls: str, strategy: str) -> SymbolCfg:
     sid = stream_id(symbol, strategy, cls)
     cost = COST_BPS.get(symbol, CLASS_COST[cls])
     common = dict(symbol=sid, provider_symbol=symbol if sid != symbol else "", cost_bps=cost, history_bars=600)
+
+    if strategy == "zone":
+        # v15 (RESEARCH.md section 16): research defaults; did NOT beat costs out of sample -> the gate decides
+        z = dict(strategy="zone", allow_short=True, zone_disp_atr=1.0, zone_min_risk_atr=1.25, zone_rr=2.0,
+                 htf_mult=4, interval="15min", interval_minutes=15)
+        if cls == "etf":
+            return SymbolCfg(kind="stock", tz="America/New_York", flatten_eod=True, eod_time="15:45",
+                             windows=[("09:45", "15:30")], **common, **z)
+        if cls in ("fx", "metal"):
+            return SymbolCfg(kind="fx", tz="America/New_York", flatten_eod=True, eod_time="16:45", poll_sec=20.0,
+                             windows=[("03:00", "12:00")], **common, **z)
+        return SymbolCfg(kind="crypto", tz="UTC", provider="binance", poll_sec=5.0, **common, **z)
 
     if cls == "etf":
         base = SymbolCfg(kind="stock", tz="America/New_York", flatten_eod=True, eod_time="15:45",

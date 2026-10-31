@@ -23,6 +23,7 @@ import pandas as pd
 
 from config import Params, SymbolCfg
 import structure
+import zones
 
 
 def add_indicators(df: pd.DataFrame, p: Params) -> pd.DataFrame:
@@ -79,6 +80,15 @@ def signals(d: pd.DataFrame, p: Params, scfg: SymbolCfg) -> pd.DataFrame:
         long_sig, short_sig = _scalp(d, scfg)
     elif scfg.strategy == "rsi2":
         long_sig, short_sig = _rsi2(d, scfg)
+    elif scfg.strategy == "zone":
+        htf = structure.htf_trend(d, scfg.interval_minutes * scfg.htf_mult) if scfg.htf_mult else None
+        long_sig, short_sig, sl, tp, active = zones.find(d, scfg, htf)
+        d = d.assign(sl_dist=sl, tp_dist=tp)
+        if htf is not None:
+            d = d.assign(htf_trend=htf)
+        out = _finish(d, p, scfg, long_sig, short_sig)
+        out.attrs["zones"] = active
+        return out
     else:
         long_sig, short_sig = _pullback(d, p, up_trend, dn_trend)
     if scfg.htf_mult:
@@ -135,13 +145,15 @@ def _finish(d, p, scfg, long_sig, short_sig):
     _, target_atr = stop_target(p, scfg)
     # Cost filter: the target must be worth at least N x the round-trip cost.
     target_bps = target_atr * d["atr"] / d["close"] * 1e4
+    if "tp_dist" in d.columns:                       # zone strategy: per-signal target distance
+        target_bps = (d["tp_dist"] / d["close"] * 1e4).fillna(0.0)
     worth_it = target_bps >= p.min_target_cost_multiple * 2.0 * scfg.cost_bps
 
     side = np.where(long_sig & worth_it, 1, np.where(short_sig & worth_it, -1, 0))
     out = d.copy()
     out["side"] = side
     warmup = max(p.ema_slow * 2, p.atr_len * 2, p.rsi_len * 2)
-    if scfg.strategy in ("scalp", "rsi2"):
+    if scfg.strategy in ("scalp", "rsi2", "zone"):
         warmup = max(warmup, 200)                     # EMA200 needs history before it means anything
     out.iloc[:warmup, out.columns.get_loc("side")] = 0
     return out
@@ -160,6 +172,39 @@ def _rsi2_trigger(c0: float, U: float, D: float, th: float, long: bool) -> float
     if U >= r * D:
         return c0 - (U - r * D) / r
     return c0 + (r * D - U)
+
+
+def _zone_plan(d, scfg, out, c, atr):
+    """Zone strategy: the nearest still-unused demand zone below / supply zone above = the next entries."""
+    zs = d.attrs.get("zones") or []
+    for side, key in ((1, "long"), (-1, "short")):
+        if side == -1 and not scfg.allow_short:
+            continue
+        cand = [z for z in zs if z["side"] == side and (z["hi"] < c if side == 1 else z["lo"] > c)]
+        if not cand:
+            continue
+        z = min(cand, key=lambda z: abs(c - (z["hi"] if side == 1 else z["lo"])))
+        edge = z["hi"] if side == 1 else z["lo"]
+        stop = z["lo"] - scfg.zone_buf_atr * atr if side == 1 else z["hi"] + scfg.zone_buf_atr * atr
+        risk = max(abs(edge - stop), scfg.zone_min_risk_atr * atr)
+        stop = edge - side * risk
+        out[key] = {"trigger": round(edge, 6), "op": "<" if side == 1 else ">", "entry": round(edge, 6),
+                    "stop": round(stop, 6), "target": round(edge + side * scfg.zone_rr * risk, 6),
+                    "dist_pct": round((edge / c - 1.0) * 100.0, 3), "zone": [round(z["lo"], 6), round(z["hi"], 6)]}
+    if not (out["long"] or out["short"]):
+        out["note"] = "لا منطقة مؤسسات نشطة قريبة"
+    try:
+        tail = structure.analyze(d.iloc[-300:])
+        r = tail.iloc[-1]
+        out["structure"] = {"trend": int(r["st_trend"]), "event": r["st_event"],
+                            "swing_hi": None if math.isnan(r["swing_hi"]) else round(float(r["swing_hi"]), 6),
+                            "swing_lo": None if math.isnan(r["swing_lo"]) else round(float(r["swing_lo"]), 6),
+                            "leg_atr": round(float(r["leg_atr"]), 2),
+                            "htf": int(d["htf_trend"].iloc[-1]) if "htf_trend" in d.columns else None,
+                            "text": structure.describe(r)}
+    except Exception:
+        pass
+    return out
 
 
 def plan_levels(d: pd.DataFrame, p: Params, scfg: SymbolCfg) -> dict:
@@ -203,6 +248,8 @@ def plan_levels(d: pd.DataFrame, p: Params, scfg: SymbolCfg) -> dict:
         trig_l = float(last["vwap"] - scfg.vwap_k * atr)
         trig_s = float(last["vwap"] + scfg.vwap_k * atr)
         op_l, op_s = "<", ">"
+    elif scfg.strategy == "zone":
+        return _zone_plan(d, scfg, out, c, atr)
     elif scfg.strategy == "rsi2":
         U, D = float(last["up2"]), float(last["dn2"])
         trig_l = _rsi2_trigger(c, U, D, scfg.rsi2_th, True)

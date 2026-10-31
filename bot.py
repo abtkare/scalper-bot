@@ -88,6 +88,8 @@ class Pending:
     entry_ts: pd.Timestamp
     nominal: float          # epoch of the entry bar's open
     deadline: float
+    sl_dist: Optional[float] = None    # zone strategy: per-signal stop / target distance (price units)
+    tp_dist: Optional[float] = None
 
 
 class SymState:
@@ -706,7 +708,25 @@ class Runtime:
         except Exception as e:
             log.warning("%s: chart/analysis failed: %s", cfg.symbol, e)
         if side != 0:
-            self._create_pending(ss, side, atr, close, last_ts, now)
+            sl_d = float(d["sl_dist"].iloc[-1]) if "sl_dist" in d.columns else None
+            tp_d = float(d["tp_dist"].iloc[-1]) if "tp_dist" in d.columns else None
+            self._create_pending(ss, side, atr, close, last_ts, now, sl_d, tp_d)
+
+    def _eod_due(self, ss: SymState, now: float) -> bool:
+        """True once a day-flat stream is past its flat time (or it is a later day than the entry)."""
+        pos, cfg = ss.eng.pos, ss.cfg
+        if pos is None or not cfg.flatten_eod:
+            return False
+        local = self._local(ss, now)
+        if self._is_stock(ss):
+            if pos.entry_ts.date() < local.date():
+                sess = cal.session(local.date())
+                return sess is not None and local >= sess[0]
+            sess = cal.session(local.date())
+            return sess is not None and local >= sess[1] - timedelta(minutes=ss.flat_min)
+        if self._is_fx(ss):
+            return pos.entry_ts.date() < local.date() or local.strftime("%H:%M") >= cfg.eod_time
+        return False
 
     def _trail(self, ss: SymState, d: pd.DataFrame, atr: float, close: float, now: float) -> None:
         """v14: after a bar closes, move the stop behind the last confirmed swing (never wider). The tick loop
@@ -744,7 +764,8 @@ class Runtime:
         return bool(ss.cfg.trail == "swing" and ss.cfg.trail_no_target)
 
     def _create_pending(self, ss: SymState, side: int, atr: float, close: float,
-                        signal_ts: pd.Timestamp, now: float) -> None:
+                        signal_ts: pd.Timestamp, now: float, sl_dist: Optional[float] = None,
+                        tp_dist: Optional[float] = None) -> None:
         if ss.last_signal_ts is not None and signal_ts <= ss.last_signal_ts:
             return                                             # already handled (restart / duplicate fetch)
         ss.last_signal_ts = signal_ts                          # at most ONE attempt per signal bar
@@ -758,7 +779,8 @@ class Runtime:
             return
         if ss.eng.pos is not None:
             return
-        ss.pending = Pending(side, atr, close, signal_ts, entry_ts, nominal, nominal + self.p.max_entry_delay_sec)
+        ss.pending = Pending(side, atr, close, signal_ts, entry_ts, nominal, nominal + self.p.max_entry_delay_sec,
+                             sl_dist, tp_dist)
         ss.next_quote_try = now                                # fetch a live price immediately
         q = ss.quote
         if q is not None:
@@ -789,7 +811,7 @@ class Runtime:
             ss.pending = None
             log.info("%s: entry cancelled (STOP/FLATTEN file, data errors, or end of session)", sym)
             return
-        plan = ss.eng.plan_entry(pd_.entry_ts, px, pd_.side, pd_.atr, self._utc_day(now))
+        plan = ss.eng.plan_entry(pd_.entry_ts, px, pd_.side, pd_.atr, self._utc_day(now), pd_.sl_dist, pd_.tp_dist)
         if plan is None:
             ss.pending = None
             log.info("%s: entry refused by rules (window / daily limits / shorts off / size 0)", sym)
@@ -823,6 +845,15 @@ class Runtime:
             if pos is None:
                 continue
             sym = ss.cfg.symbol
+            if self._eod_due(ss, now) and (ss.quote is None or now - ss.quote.ts > 15.0):
+                # v15: the daily flat must not depend on a fresh price (a QQQ position stayed open overnight
+                # on 2026-10-27). No live price for 15 s after the flat time -> close at the last known price.
+                ref = ss.quote.mid if ss.quote is not None else float((ss.plan or {}).get("price") or 0.0)
+                if ref > 0:
+                    self.n.send(f"{sym}: end-of-day flat without a fresh price - closing at the last known "
+                                f"price {ref:.5g}", key=f"eodnq-{sym}", every=60, level=logging.WARNING)
+                    self._do_exit(ss, "eod_noquote", ref, now)
+                    continue
             if not self._active(ss, now):
                 if self._is_fx(ss):
                     self.n.send(f"{sym}: position open while the market is closed - will close at the next price",
