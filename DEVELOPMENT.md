@@ -54,7 +54,7 @@
 1. **أي تغيير في الاستراتيجية أو الإعدادات = اختبار تاريخي أولاً:** `python backtest.py --all` وقارن التدريب (60%) بالاختبار (40%). إن ساءت النتيجة خارج العيّنة فلا ترفع.
 2. **شغّل كل الاختبارات قبل الرفع:**
    ```
-   python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py && python test_watchlist.py && python test_ctrader.py && python test_structure.py && python test_news.py && python test_prices.py && python test_quota.py && python test_ntfy.py && python test_v14.py && python test_v15.py
+   python test_engine.py && python test_robust.py && python test_guardian.py && python test_remote.py && python test_scalp.py && python test_fx.py && python test_watchlist.py && python test_ctrader.py && python test_structure.py && python test_news.py && python test_prices.py && python test_quota.py && python test_ntfy.py && python test_v14.py && python test_v15.py && python test_v16.py
    ```
 3. **لا تضع أي سر في المستودع** (المفتاح، كلمة سر اللوحة، MONITOR_TOKEN، NTFY_TOPIC). هذه تُكتب فقط في إعدادات الحاوية على هوستنجر.
 4. الحارس والأزرار **تقلل المخاطرة فقط**؛ لا تضف أي طريق يفتح صفقة من خارج الاستراتيجية.

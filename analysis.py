@@ -1,4 +1,4 @@
-"""Per-stream chart data + plain-Arabic analysis for the dashboard (v14).
+"""Per-stream chart data + plain-Arabic analysis for the dashboard (v14; money flow + timeframes v16).
 
 INFORMATIONAL ONLY: nothing here opens, closes or changes a trade. It reads the same closed bars the strategy
 used and explains them: what the strategy waits for, the market structure, the key levels, the last candle,
@@ -75,9 +75,64 @@ def chart(d: pd.DataFrame, scfg, k: Optional[int] = None, n: int = CHART_BARS) -
     for col, label in names:
         if col in v.columns:
             out["lines"][label] = [_r(x) for x in v[col]]
+    # money flowing in each candle (v16): dollar volume split into buying / selling pressure
+    mf = money_flow(v)
+    out["hasv"] = mf["hasv"]
+    if mf["hasv"]:
+        out["vb"] = [_r(x, 4) for x in mf["buy"]]
+        out["vs"] = [_r(x, 4) for x in mf["sell"]]
     # institutional demand / supply zones (v15) - drawn on every chart, informational only
     zs = inst_zones(d, scfg)
     out["zones"] = [[z["side"], _r(z["lo"]), _r(z["hi"]), max(0, len(v) - 1 - z["age"])] for z in zs]
+    return out
+
+
+def money_flow(d: pd.DataFrame) -> dict:
+    """Money that traded in each candle = volume x typical price (USD), split into buying / selling pressure by
+    where the candle CLOSED inside its range (close at the high = all buying, at the low = all selling; the
+    Chaikin money-flow split). Exchanges only publish TOTAL volume, so the split is an estimate.
+    Spot gold / FX have no central exchange -> no real volume (hasv False)."""
+    vol = d["volume"].astype(float).fillna(0.0).values if "volume" in d.columns else np.zeros(len(d))
+    hasv = bool(len(vol) and (vol[-min(len(vol), 50):] > 0).mean() > 0.5)
+    if not hasv:
+        return {"hasv": False}
+    h, l, c = (d[k].astype(float).values for k in ("high", "low", "close"))
+    rng = np.where(h - l > 0, h - l, np.nan)
+    clv = np.nan_to_num((c - l) / rng, nan=0.5)            # 0 = closed at the low, 1 = at the high
+    usd = vol * (h + l + c) / 3.0
+    buy, sell = usd * clv, usd * (1.0 - clv)
+    n = min(20, len(usd))
+    cmf = float((buy[-n:] - sell[-n:]).sum() / usd[-n:].sum()) if usd[-n:].sum() > 0 else 0.0
+    avg = float(np.median(usd[-51:-1])) if len(usd) > 5 else float(np.median(usd))   # median: feeds have spikes
+    return {"hasv": True, "buy": buy, "sell": sell, "cmf": cmf, "usd_last": float(usd[-1]),
+            "rel_last": float(usd[-1] / avg) if avg > 0 else 0.0, "buy_pct_last": float(clv[-1] * 100)}
+
+
+TF_MULTS = {15: (1, 2, 4, 16), 5: (1, 3, 12, 48), 60: (1, 4, 24), 30: (1, 2, 8), 1: (1, 5, 15, 60)}
+
+
+def tf_label(minutes: int) -> str:
+    return f"{minutes // 1440}d" if minutes % 1440 == 0 else f"{minutes // 60}h" if minutes % 60 == 0 else f"{minutes}min"
+
+
+def chart_tf(bars: pd.DataFrame, scfg, p, mult: int) -> dict:
+    """The same stream's closed bars re-built on a HIGHER timeframe (mult x its interval) for the chart switch."""
+    from strategy import add_indicators
+    mins = scfg.interval_minutes * mult
+    if mult <= 1:
+        df = bars
+    else:
+        rule = "1D" if mins == 1440 else f"{mins}min"
+        df = bars.resample(rule, label="left", closed="left").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
+    if len(df) < 10:
+        return {"error": "شموع غير كافية لهذا الإطار"}
+    cfg = _replace(scfg, interval=tf_label(mins), interval_minutes=mins, strategy="pullback" if mult > 1 else scfg.strategy)
+    d = add_indicators(df, p)
+    out = chart(d, cfg)
+    out["lines"] = {"EMA20": [_r(x) for x in d["ema_f"].iloc[-len(out["t"]):]],
+                    "EMA50": [_r(x) for x in d["ema_s"].iloc[-len(out["t"]):]]} if mult > 1 else out["lines"]
+    out["mult"] = mult
     return out
 
 
@@ -91,6 +146,10 @@ def inst_zones(d: pd.DataFrame, scfg) -> list:
         return zmod.find(d.iloc[-400:], cfg)[4]
     except Exception:
         return []
+
+
+def _usd(x: float) -> str:
+    return f"{x / 1e9:.2f} مليار $" if x >= 1e9 else f"{x / 1e6:.1f} مليون $" if x >= 1e6 else f"{x / 1e3:.0f} ألف $"
 
 
 def _candle(row, prev, atr: float) -> str:
@@ -153,6 +212,13 @@ def analyze(d: pd.DataFrame, plan: dict, scfg, position: Optional[dict] = None) 
         cd = _candle(last, d.iloc[-2], atr)
         if cd:
             lines.append(("🕯 آخر شمعة", cd))
+    mf = money_flow(d.iloc[-60:])
+    if mf["hasv"]:
+        flow = "دخول أموال (ضغط شراء)" if mf["cmf"] > 0.05 else "خروج أموال (ضغط بيع)" if mf["cmf"] < -0.05 else "متوازن"
+        lines.append(("💰 تدفق الأموال", f"آخر 20 شمعة: {flow} ({mf['cmf']:+.2f}) · آخر شمعة {_usd(mf['usd_last'])} "
+                      f"({mf['rel_last']:.1f}× المعتاد)، شراء ~{mf['buy_pct_last']:.0f}%"))
+    else:
+        lines.append(("💰 تدفق الأموال", "لا يوجد حجم تداول حقيقي لهذا السوق (الذهب والعملات الفورية بلا بورصة مركزية)"))
     zs = inst_zones(d, scfg)
     if zs and atr > 0:
         dem = sorted([z for z in zs if z["side"] == 1 and z["hi"] <= c * 1.0 + atr * 3], key=lambda z: c - z["hi"])

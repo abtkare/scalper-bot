@@ -105,8 +105,11 @@ def test_weekend_idle():
     sat = datetime(2026, 10, 24, 12, 0)
     e = env_at(sat, fx_cfg(), tr.base)
     e.run(600)
-    assert e.mkt.bar_calls == 0 and e.mkt.quote_calls == 0
-    ok("weekend: zero data requests (credits saved)")
+    assert e.mkt.bar_calls <= 1 and e.mkt.quote_calls == 0       # v16: one start-up download for the chart
+    n = e.mkt.bar_calls
+    e.run(1800)
+    assert e.mkt.bar_calls == n and e.mkt.quote_calls == 0
+    ok("weekend: one start-up chart download, then zero data requests (credits saved)")
 
 
 def test_filler_bars_dropped():

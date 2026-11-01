@@ -48,8 +48,9 @@ class Dashboard:
                  alive_fn: Callable[[], float], password: str, token: str, tail: Optional[LogTail] = None,
                  port: int = 8000, restart_fn: Optional[Callable[[], None]] = None,
                  watch_fn: Optional[Callable[[str, dict], str]] = None,
-                 feeds: Optional[dict] = None):
+                 feeds: Optional[dict] = None, chart_fn: Optional[Callable[[dict], dict]] = None):
         self.watch_fn = watch_fn
+        self.chart_fn = chart_fn                     # /api/chart?id=&tf= (timeframe switch, v16)
         self.feeds = feeds or {}                     # extra read-only JSON endpoints (ticker, news)
         self.status_fn, self.command_fn, self.alive_fn = status_fn, command_fn, alive_fn
         self.password, self.token, self.tail, self.port = password, token, tail, port
@@ -120,6 +121,13 @@ class Dashboard:
                     if not (basic or tok):
                         return self._deny()
                     return self._send(200, dash.status())
+                if u.path == "/api/chart" and dash.chart_fn is not None:
+                    if not (basic or tok):
+                        return self._deny()
+                    try:
+                        return self._send(200, dash.chart_fn(q))
+                    except Exception as e:
+                        return self._send(500, {"error": type(e).__name__})
                 if u.path in dash.feeds:
                     if not (basic or tok):
                         return self._deny()
@@ -331,7 +339,7 @@ function qTxt(q){ if(!q||q.n==null) return ''; let t='اختبار تاريخه:
 function stxt(x){ if(!x) return ''; const H={1:'صاعد',"-1":'هابط',0:'متذبذب'};
  return '<div style="font-size:12px;margin-top:2px">🧭 '+esc(x.text)+(x.htf!=null?' · الإطار الأكبر: '+H[x.htf]:'')+(x.swing_hi!=null?'<span class="mut" dir="ltr"> · قمة '+dp(x.swing_hi)+' / قاع '+dp(x.swing_lo)+'</span>':'')+'</div>';}
 const TKP={}; let NF='all', NEWS=null;
-let CH={}, LAST=null; const SEL={}, OPEN={};
+let CH={}, LAST=null; const SEL={}, OPEN={}, TFSEL={}, CHX={};
 function slipTxt(x){ if(!x||!x.n) return ''; return '<div class="mut" style="font-size:12px">الانزلاق المقاس ('+x.n+' صفقة): دخول '+(x.in>=0?'+':'')+x.in+' · خروج '+(x.out>=0?'+':'')+x.out+' نقطة أساس'+(x.fill?' · تنفيذ الوسيط '+(x.fill>=0?'+':'')+x.fill:'')+'</div>';}
 function anTxt(id,v){ const a=v.analysis; if(!a) return '';
  let h='<div class="vd">🎯 '+esc(a.verdict)+'</div><details class="an" '+(OPEN[id]?'open':'')+' ontoggle="OPEN[\''+esc(id)+'\']=this.open"><summary>🔎 تحليل الاستراتيجية لهذا الرمز</summary><div class="mut" style="margin-top:4px">'+esc(a.desc)+'</div>';
@@ -340,20 +348,29 @@ function anTxt(id,v){ const a=v.analysis; if(!a) return '';
 function pickSel(t,rows){ const ids=rows.map(r=>r[0]).filter(i=>CH[i]); if(!ids.length) return null;
  if(SEL[t]&&ids.includes(SEL[t])) return SEL[t]; const op=ids.find(i=>CH[i].pos); return op||ids[0];}
 function setSel(t,id){SEL[t]=id; if(LAST) renderWL(LAST);}
-function chartBlock(t,rows){ const sid=pickSel(t,rows); if(!sid) return '<div class="mut" style="font-size:12px;margin-top:6px">📊 الشموع تظهر بعد أول شمعة مغلقة…</div>';
+function chartBlock(t,rows){ const sid=pickSel(t,rows); if(!sid) return '<div class="mut" style="font-size:12px;margin-top:6px">📊 الشموع تظهر بعد أول تحميل للبيانات…</div>';
  let tabs=''; const ids=rows.map(r=>r[0]).filter(i=>CH[i]);
  if(ids.length>1) for(const i of ids){ const v=(LAST.symbols||{})[i]||{}; tabs+='<span class="chip '+(i==sid?'on':'')+'" onclick="setSel(\''+esc(t)+'\',\''+esc(i)+'\')">'+esc((SN[v.strategy]||v.strategy)+' · '+CH[i].iv)+(CH[i].pos?' ●':'')+'</span>';}
- return '<div style="margin-top:6px">'+tabs+'</div><div class="chw" dir="ltr">'+svgChart(CH[sid],(LAST.symbols||{})[sid])+'</div>'
-  +'<div class="mut" style="font-size:11px;margin-top:3px">🟩🟥 الشموع · ▲▼ قيعان وقمم مؤكدة · <span style="color:var(--b)">━ دخول</span> · <span style="color:var(--r)">━ وقف</span> · <span style="color:var(--g)">━ هدف</span> · ┅ مستوى إشارة الشراء/البيع · <span style="color:var(--g)">▮ منطقة طلب</span> / <span style="color:var(--r)">▮ عرض</span> (مؤسسات، للمعلومة)</div>';}
+ const m=TFSEL[sid]||1; let tf='<span class="mut" style="font-size:12px">الإطار:</span>';
+ for(const [mm,lab] of (CH[sid].tfs||[[1,CH[sid].iv]])) tf+='<span class="chip '+(mm==m?'on':'')+'" style="padding:3px 9px" onclick="setTF(\''+esc(sid)+'\','+mm+')">'+esc(lab)+'</span>';
+ let c=CH[sid], note='';
+ if(m>1){ const x=CHX[sid+'@'+m]; if(!x){ c=null; note='⏳ تحميل الإطار…'; } else if(x.error){ c=null; note=esc(x.error);} else c=x; }
+ const body=c?svgChart(c,(LAST.symbols||{})[sid]):'<div class="mut" style="padding:30px;text-align:center">'+note+'</div>';
+ return '<div style="margin-top:6px">'+tabs+'</div><div style="margin-top:2px">'+tf+'</div><div class="chw" dir="ltr">'+body+'</div>'
+  +'<div class="mut" style="font-size:11px;margin-top:3px">🟩🟥 الشموع · ▲▼ قيعان وقمم مؤكدة · <span style="color:var(--b)">━ دخول</span> · <span style="color:var(--r)">━ وقف</span> · <span style="color:var(--g)">━ هدف</span> · ┅ مستوى إشارة الشراء/البيع · <span style="color:var(--g)">▮ منطقة طلب</span> / <span style="color:var(--r)">▮ عرض</span> (مؤسسات، للمعلومة)'
+  +(c&&c.hasv?' · 💰 حجم الأموال في كل شمعة: <span style="color:var(--g)">شراء</span> / <span style="color:var(--r)">بيع</span> (تقدير من موقع الإغلاق)':(c?' · 💰 لا يوجد حجم تداول حقيقي لهذا السوق':''))+'</div>';}
+function setTF(sid,m){ TFSEL[sid]=m; if(m>1) loadTF(sid,m); if(LAST) renderWL(LAST);}
+async function loadTF(sid,m){ try{ const r=await fetch('api/chart?id='+encodeURIComponent(sid)+'&tf='+m,{cache:'no-store'}); CHX[sid+'@'+m]=r.ok?await r.json():{error:'تعذّر التحميل'}; if(LAST) renderWL(LAST);}catch(e){} }
+function usd(x){ return x>=1e9?(x/1e9).toFixed(2)+'B$':x>=1e6?(x/1e6).toFixed(1)+'M$':(x/1e3).toFixed(0)+'K$';}
 function hm(ts){ return new Date(ts*1000).toLocaleString('en-GB',{timeZone:'Asia/Baghdad',weekday:'short',hour:'2-digit',minute:'2-digit',hour12:false});}
-function svgChart(c,v){ const W=360,H=210,L=4,R=52,T=8,B=20, n=c.t.length; if(!n) return '';
+function svgChart(c,v){ const W=360,H=210,L=4,R=52,T=8,B=20,VH=c.hasv?50:0, n=c.t.length; if(!n) return '';
  const px=v&&v.last_price; let lo=Math.min(...c.l), hi=Math.max(...c.h);
  const lv=[]; const P=c.pos; if(P){lv.push(P.entry,P.stop); if(P.target!=null) lv.push(P.target); if(P.stop0!=P.stop) lv.push(P.stop0);}
  for(const k in (c.trig||{})) lv.push(c.trig[k]); if(px) lv.push(px);
  const span0=hi-lo||1; for(const x of lv){ if(x>=lo-span0*0.6&&x<=hi+span0*0.6){lo=Math.min(lo,x);hi=Math.max(hi,x);} }
  const pad=(hi-lo)*0.06||1; lo-=pad; hi+=pad;
  const cw=(W-L-R)/n, y=x=>T+(hi-x)/(hi-lo)*(H-T-B), xs=i=>L+cw*(i+0.5);
- let s='<svg viewBox="0 0 '+W+' '+H+'" xmlns="http://www.w3.org/2000/svg" font-size="9" font-family="system-ui,sans-serif">';
+ let s='<svg viewBox="0 0 '+W+' '+(H+VH)+'" xmlns="http://www.w3.org/2000/svg" font-size="9" font-family="system-ui,sans-serif">';
  for(let g=0;g<=4;g++){ const yy=T+g*(H-T-B)/4, val=hi-g*(hi-lo)/4; s+='<line x1="'+L+'" x2="'+(W-R)+'" y1="'+yy+'" y2="'+yy+'" style="stroke:var(--line)" stroke-width="0.5"/><text x="'+(W-R+3)+'" y="'+(yy+3)+'" style="fill:var(--mut)">'+dp(val)+'</text>';}
  for(let i=0;i<n;i+=Math.ceil(n/4)) s+='<text x="'+xs(i)+'" y="'+(H-6)+'" text-anchor="middle" style="fill:var(--mut)">'+hm(c.t[i])+'</text>';
  const LC={VWAP:'var(--y)',EMA200:'#9b3df0',EMA20:'var(--y)',EMA50:'#9b3df0'};
@@ -375,6 +392,12 @@ function svgChart(c,v){ const W=360,H=210,L=4,R=52,T=8,B=20, n=c.t.length; if(!n
   let ei=c.t.findIndex(t=>t>=P.t); if(ei<0) ei=n-1; const ex=xs(ei), ey=y(P.entry);
   s+=P.side==1?'<path d="M'+ex+' '+(ey+4)+'l-5 9h10z" style="fill:var(--b)"/>':'<path d="M'+ex+' '+(ey-4)+'l-5 -9h10z" style="fill:var(--b)"/>';}
  if(px) s+=hl(px,'#5b6475','',false,0.6);
+ if(c.hasv&&c.vb){ const tot=c.vb.map((b,i)=>(b||0)+(c.vs[i]||0)); const srt=tot.slice().sort((a,b)=>a-b);
+  const cap=Math.max(1,srt[Math.floor(srt.length*0.95)]||1), y0=H+VH-3, vh=VH-14;
+  s+='<line x1="'+L+'" x2="'+(W-R)+'" y1="'+(H+1)+'" y2="'+(H+1)+'" style="stroke:var(--line)" stroke-width="0.6"/><text x="'+(L+2)+'" y="'+(H+10)+'" style="fill:var(--mut)" font-size="8">💰 حجم الأموال</text>';
+  for(let i=0;i<n;i++){ const k=Math.min(1,tot[i]/cap), hb=vh*k*((c.vb[i]||0)/(tot[i]||1)), hs=vh*k-hb, x=xs(i)-bw/2;
+   s+='<rect x="'+x+'" y="'+(y0-hb)+'" width="'+bw+'" height="'+Math.max(0,hb)+'" style="fill:var(--g)" opacity="0.85"/><rect x="'+x+'" y="'+(y0-hb-hs)+'" width="'+bw+'" height="'+Math.max(0,hs)+'" style="fill:var(--r)" opacity="0.85"/>';}
+  s+='<text x="'+(W-R+3)+'" y="'+(H+VH/2+3)+'" style="fill:var(--mut)" font-size="8.5">'+usd(tot[n-1])+'</text>';}
  return s+'</svg>';}
 
 function age(s){return s<120?'لحظي':s<3600?'متأخر '+Math.round(s/60)+' د':'السوق مغلق';}
@@ -423,6 +446,6 @@ async function wl(action,body,q){ if(q&&!confirm(q)) return; body.action=action;
 function addSym(){ const sym=$('nsym').value.trim().toUpperCase(); if(!sym){alert('اكتب الرمز');return;}
  const st=['scalp','rsi2','breakout','zone'].filter(x=>$('st_'+x).checked); if(!st.length){alert('اختر استراتيجية واحدة على الأقل');return;}
  wl('add',{symbol:sym,'class':$('ncls').value,strategies:st},'إضافة '+sym+'؟ (يعيد البوت التشغيل)'); }
-async function loadCharts(){ try{ const r=await fetch('api/charts',{cache:'no-store'}); if(!r.ok) return; CH=await r.json(); if(LAST) renderWL(LAST);}catch(e){} }
+async function loadCharts(){ try{ const r=await fetch('api/charts',{cache:'no-store'}); if(!r.ok) return; CH=await r.json(); for(const [sid,m] of Object.entries(TFSEL)) if(m>1) loadTF(sid,m); if(LAST) renderWL(LAST);}catch(e){} }
 load(); setInterval(load,5000); loadCharts(); setInterval(loadCharts,15000); loadTicker(); setInterval(loadTicker,3000); loadNews(); setInterval(loadNews,60000);
 </script></body></html>"""

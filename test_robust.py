@@ -397,8 +397,10 @@ def test_overnight_flatten_at_open():
 def test_holiday_no_calls():
     e = _stock_env((2026, 12, 25), 10, 0)
     e.run(300)
-    assert e.mkt.bar_calls == 0 and e.mkt.quote_calls == 0
-    ok("market holiday: zero API calls (no wasted credits)")
+    assert e.mkt.bar_calls == 1 and e.mkt.quote_calls == 0       # v16: one start-up download for the chart
+    e.run(900)
+    assert e.mkt.bar_calls == 1 and e.mkt.quote_calls == 0
+    ok("market holiday: one start-up chart download, then zero API calls (no wasted credits)")
 
 
 # ------------------------------------------------------------------ 11) state store

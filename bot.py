@@ -122,6 +122,8 @@ class SymState:
         self.auto_off = ""                                 # reason if the forward kill-switch turned it off
         self.flat_min = 16 * 60 - (int(cfg.eod_time[:2]) * 60 + int(cfg.eod_time[3:]))   # 5 for "15:55"
         self.chart: Optional[dict] = None                  # last closed candles + overlays (dashboard)
+        self.chart_tried = False                           # start-up chart download done (v16)
+        self.bars: Optional[pd.DataFrame] = None           # last closed bars (timeframe switch on the dashboard)
         self.analysis: Optional[dict] = None               # plain-Arabic reading (dashboard)
         self.slip = {"n": 0, "in": 0.0, "out": 0.0, "fill": 0.0}   # measured slippage, bps sums (v14)
 
@@ -472,7 +474,19 @@ class Runtime:
         self._submit(ss, "quote", ss.quote_prov, ss.quote_prov.quote, ss.cfg)
 
     def _schedule_bars(self, ss: SymState, now: float) -> None:
-        if ss.bar_future is not None or now < ss.next_bar_try or not self._active(ss, now):
+        if ss.bar_future is not None or now < ss.next_bar_try:
+            return
+        if ss.store.df.empty and not ss.chart_tried:
+            # v16: ONE download at start-up even when the market is closed (weekend / night), so every chart and
+            # plan is visible right after a restart. ~1 credit per stream; no entry can come from it.
+            b = ss.bar_prov.budget
+            if b is not None and not b.try_acquire(1.0, "scan"):
+                return
+            ss.chart_tried = True
+            ss.next_bar_try = now + 30.0
+            self._submit(ss, "bar", ss.bar_prov, ss.bar_prov.bars, ss.cfg, ss.store.keep)
+            return
+        if not self._active(ss, now):
             return
         if not self._in_watch_hours(ss, now):
             return
@@ -707,6 +721,9 @@ class Runtime:
                                            {"side": "long" if p_.side == 1 else "short", "stop": p_.stop})
         except Exception as e:
             log.warning("%s: chart/analysis failed: %s", cfg.symbol, e)
+        ss.bars = closed
+        if side != 0 and not self._active(ss, now):
+            side = 0                                           # start-up download while the market is closed
         if side != 0:
             sl_d = float(d["sl_dist"].iloc[-1]) if "sl_dist" in d.columns else None
             tp_d = float(d["tp_dist"].iloc[-1]) if "tp_dist" in d.columns else None
@@ -756,8 +773,30 @@ class Runtime:
             pl = ss.plan or {}
             c["trig"] = {k: pl[k]["trigger"] for k in ("long", "short") if pl.get(k)}
             c["ticker"] = ss.cfg.ticker
+            c["tfs"] = [[m, analysis.tf_label(ss.cfg.interval_minutes * m)]
+                        for m in analysis.TF_MULTS.get(ss.cfg.interval_minutes, (1,))]
             out[ss.cfg.symbol] = c
         return out
+
+    def chart_tf(self, q: dict) -> dict:
+        """/api/chart?id=XAU/USD&tf=4 : that stream's chart on a higher timeframe (dashboard only)."""
+        sid = (q.get("id") or [""])[0]
+        try:
+            mult = int((q.get("tf") or ["1"])[0])
+        except ValueError:
+            mult = 1
+        ss = self.by_name.get(sid)
+        if ss is None or ss.bars is None:
+            return {"error": "لا شموع بعد"}
+        if mult not in analysis.TF_MULTS.get(ss.cfg.interval_minutes, (1,)):
+            return {"error": "إطار غير مدعوم"}
+        c = analysis.chart_tf(ss.bars, ss.cfg, self.p, mult)
+        p_ = ss.eng.pos
+        if p_ is not None and "t" in c:
+            c["pos"] = {"side": p_.side, "entry": p_.entry, "stop": p_.stop, "stop0": p_.stop0 or p_.stop,
+                        "target": None if self._no_target(ss) else p_.target,
+                        "t": analysis.epochs([p_.entry_ts], ss.cfg.tz)[0]}
+        return c
 
     @staticmethod
     def _no_target(ss: SymState) -> bool:
@@ -1184,7 +1223,7 @@ def main() -> None:
                   watch_fn=_watch,
                   feeds={"/api/ticker": lambda: rt.prices.board() if rt.prices is not None else {"items": []},
                          "/api/news": lambda: rt.news.snapshot() if rt.news is not None else None,
-                         "/api/charts": rt.charts}).start()
+                         "/api/charts": rt.charts}, chart_fn=rt.chart_tf).start()
 
     if os.getenv("NEWS_WATCH", "1") != "0":                  # Truth Social window - alerts only, never trades
         try:
